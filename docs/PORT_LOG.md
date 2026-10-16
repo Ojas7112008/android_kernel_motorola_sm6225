@@ -993,3 +993,27 @@ comparison, timestamp-independence and content/mode/fingerprint/corrupt-archive
 negative tests pass, as do the preparation/native-Kbuild regressions.
 Replacement cloud runs: 38863933185 (BakaSU), 38863936189 (SUSFS). These are
 currently running; no successful new cloud-build or device-test claim is made.
+
+
+## 2026-10-16: Selectable kernel or Axion boot output
+
+Cloud runs 38863933185 (BakaSU only) and 38863936189 (all-eight SUSFS)
+completed successfully after the compiler content-integrity correction.
+Added a required manual output_format choice to both workflows: kernel
+(default) or boot.img. Raw output is copied unchanged; boot.img uses the exact
+supplied Axion original and the reviewed boot-v3/unsigned-AVB repacker.
+A single success-only upload contains exactly Image/Image.sha256 or
+boot.img/boot.img.sha256. Internal modules, DTBs, configuration and diagnostics
+remain runner-local. No device operation or new kernel compilation was run
+for these packaging-only changes.
+
+Ten packaging regressions passed using the actual supplied boot base and
+a previously compiled ARM64 Image, including raw identity, exactly two files,
+SHA256 format, ramdisk/header/AVB preservation, failed/corrupt/mismatched build
+refusals, base archive hash/cache checks, and non-overwrite behavior. Both
+workflow contracts and every shell step passed syntax checks. Native build
+preparation/refusal tests pass; all 55 kernel production fingerprints match.
+The 32.2 MiB compressed original is prepared locally; publication as the
+checksum-pinned cloud build resource awaits explicit approval because the
+original project instructions prohibited image releases. No boot image is
+committed to Git.

@@ -120,7 +120,9 @@ def main():
     content = workflow.read_text()
     # PyYAML uses YAML 1.1 and reads GitHub's `on` as a boolean key.
     data = yaml.safe_load(content)
-    assert data.get('on', data.get(True)) == {'workflow_dispatch': None}
+    events = data.get('on', data.get(True))
+    assert set(events) == {'workflow_dispatch'}
+    assert events['workflow_dispatch']['inputs']['output_format']['options'] == ['kernel', 'boot.img']
     steps = data['jobs']['compile']['steps']
     assert steps[0]['uses'] == 'actions/checkout@' + pins['actions']['checkout']
     assert steps[-1]['uses'] == 'actions/upload-artifact@' + pins['actions']['upload-artifact']
