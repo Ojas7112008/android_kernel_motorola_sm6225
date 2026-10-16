@@ -1018,3 +1018,5 @@ The user explicitly approved uploading the original build resource. The
 (release 414832064, asset 646986885), targeting the clean Lineage base.
 GitHub's asset digest matches the pinned compressed SHA256. Newly compiled
 images remain Actions artifacts; no boot image is committed to Git.
+
+Public original-resource verification passed using unauthenticated Linux and Windows HTTPS downloads. Archive/image SHA256 pins matched. Both output formats passed with real compiled SUSFS build evidence and contained exactly two files. Temporary copies were removed. These workflow updates are manual only; no new kernel build was dispatched.
