@@ -1013,7 +1013,8 @@ SHA256 format, ramdisk/header/AVB preservation, failed/corrupt/mismatched build
 refusals, base archive hash/cache checks, and non-overwrite behavior. Both
 workflow contracts and every shell step passed syntax checks. Native build
 preparation/refusal tests pass; all 55 kernel production fingerprints match.
-The 32.2 MiB compressed original is prepared locally; publication as the
-checksum-pinned cloud build resource awaits explicit approval because the
-original project instructions prohibited image releases. No boot image is
-committed to Git.
+The user explicitly approved uploading the original build resource. The
+32.2 MiB compressed base was published as the axion-2.8-boot-base prerelease
+(release 414832064, asset 646986885), targeting the clean Lineage base.
+GitHub's asset digest matches the pinned compressed SHA256. Newly compiled
+images remain Actions artifacts; no boot image is committed to Git.
