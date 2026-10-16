@@ -17,7 +17,7 @@ assert modules,'No compiled kernel modules'
 for name,files in [('dtbs.tar.gz',dtbs),('modules.tar.gz',modules)]:
     with tarfile.open(art/name,'w:gz') as tar:
         for f in files:tar.add(f,arcname=str(f.relative_to(out)))
-(art/'kernel-integration.patch').write_bytes(subprocess.check_output(['git','diff','HEAD','--binary'],cwd=root))
+(art/'kernel-integration.patch').write_bytes(subprocess.check_output(['git','diff',json.loads((root/'scripts/devon/source-pins.json').read_text())['kernel_commit'],'--binary'],cwd=root))
 pins=json.loads((root/'scripts/devon/source-pins.json').read_text())
 actual_bakasu=subprocess.check_output(['git','-C',str(root/'KernelSU'),'rev-parse','HEAD']).decode().strip()
 pins['bakasu_validated_baseline']=pins['bakasu_commit']
