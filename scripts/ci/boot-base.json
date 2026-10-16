@@ -1,0 +1,8 @@
+{
+  "url": "https://github.com/Ojas7112008/android_kernel_motorola_sm6225/releases/download/axion-2.8-boot-base/axion28-devon-original-boot.img.zst",
+  "archive_sha256": "bb812bc26c276c0d018b10e754e523f2d22616a1631d2a689d1507861b4727eb",
+  "archive_bytes": 33744839,
+  "image_sha256": "1632d107116564f6130b8633c5c21b09261009a03712e086dd22cb9e71edc4de",
+  "image_bytes": 100663296,
+  "scope": "Original supplied Axion 2.8 boot image; checksum-pinned repacking resource only"
+}
