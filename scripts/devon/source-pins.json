@@ -12,5 +12,8 @@
   "clang_repository_commit": "9916fb51ccb914d62d35ad9a7b9b21d2ef046928",
   "clang_directory": "clang-r547379",
   "scope": "non-SUSFS kernel Image, dtbs and modules only; no boot image packaging or device operation",
-  "clang_archive_sha256": "6350d387cbe6d75c1df1018da2a29c6bf1b233bd58e122e44f3ef5b16a90facc"
+  "clang_archive_sha256": "6350d387cbe6d75c1df1018da2a29c6bf1b233bd58e122e44f3ef5b16a90facc",
+  "clang_git_tree": "17fee43bde5bc5860dc1d04be5ead3bd6e6f91f0",
+  "clang_content_tree_sha256": "ed38c5043e6b711d1eb8f42432556a770a3b68dfc48e1a9cc7025258d246bf3f",
+  "clang_archive_sha256_note": "Historical transport checksum; Gitiles rewrites tar mtimes. Complete Git/SHA256 content trees and executable hashes are mandatory."
 }

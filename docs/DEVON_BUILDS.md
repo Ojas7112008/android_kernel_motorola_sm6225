@@ -1,6 +1,6 @@
 # Reproducible Devon kernel builds
 
-Use a Linux filesystem without spaces (WSL ext4 is supported), Python 3.11 or newer, and the build dependencies listed in the workflows. Allow about 20 GB free for source, the 4 GB compiler and one complete build. Full kernel history and full BakaSU history are required. The compiler installer verifies both the archive and selected executables.
+Use a Linux filesystem without spaces (WSL ext4 is supported), Python 3.11 or newer, and the build dependencies listed in the workflows. Allow about 20 GB free for source, the 4 GB compiler and one complete build. Full kernel history and full BakaSU history are required. The compiler installer verifies every file, executable mode and symlink against immutable Git/SHA256 tree pins, plus selected executable SHA256 hashes.
 
 ## BakaSU only
 
