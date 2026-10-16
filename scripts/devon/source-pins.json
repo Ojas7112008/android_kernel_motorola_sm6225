@@ -1,0 +1,16 @@
+{
+  "kernel_repository": "https://github.com/LineageOS/android_kernel_motorola_sm6225",
+  "kernel_branch": "lineage-23.2",
+  "kernel_commit": "c65462bf08da2a8900b98e705bea376de7f7f19c",
+  "working_reference_repository": "https://github.com/Ojas7112008/android_kernel_motorola_sm6225",
+  "working_reference_branch": "devon-resukisu",
+  "working_reference_commit": "80f0ee4d1ec68838d25c2efeb955d31e90f85dae",
+  "working_reference_lineage_base": "239b9c3887cc30c0852f314671ea7e84f0a8f8c3",
+  "bakasu_repository": "https://github.com/Baka-SU/BakaSU",
+  "bakasu_commit": "d7260ca1e5c128061122924d0d48754e361e135c",
+  "clang_tag": "android-16.0.0_r4",
+  "clang_repository_commit": "9916fb51ccb914d62d35ad9a7b9b21d2ef046928",
+  "clang_directory": "clang-r547379",
+  "scope": "non-SUSFS kernel Image, dtbs and modules only; no boot image packaging or device operation",
+  "clang_archive_sha256": "6350d387cbe6d75c1df1018da2a29c6bf1b233bd58e122e44f3ef5b16a90facc"
+}
