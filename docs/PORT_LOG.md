@@ -977,3 +977,19 @@ Configuration/native Kbuild preparation and drift-refusal tests pass with all
 eight features. The maintained host suite covers 17 source/ABI models; old
 staged-only checkpoint tests remain historical, documented separately.
 This source publication is not a new device test or a runtime safety claim.
+
+
+### Cloud compiler transport correction
+
+First cloud runs 38862453540 and 38862456448 stopped before compilation at the
+compiler archive SHA256 check. Two independent immutable-commit archive probes
+showed different mtimes/container hashes with identical contained file hashes.
+The extracted official compiler matches Git tree
+17fee43bde5bc5860dc1d04be5ead3bd6e6f91f0. Installer integrity now covers the
+complete Git tree and a pinned SHA256 content tree plus the seven original
+executable hashes; no unverified compiler is executed. Native BakaSU checks
+and all 55 kernel production hashes are unchanged. Independent Git SHA1/SHA256
+comparison, timestamp-independence and content/mode/fingerprint/corrupt-archive
+negative tests pass, as do the preparation/native-Kbuild regressions.
+Replacement cloud runs: 38863933185 (BakaSU), 38863936189 (SUSFS). These are
+currently running; no successful new cloud-build or device-test claim is made.
