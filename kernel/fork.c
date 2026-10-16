@@ -93,6 +93,9 @@
 #include <linux/kcov.h>
 #include <linux/livepatch.h>
 #include <linux/thread_info.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/ksu_susfs.h>
+#endif
 #include <linux/cpufreq_times.h>
 #include <linux/scs.h>
 
@@ -906,6 +909,9 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 #endif
 
 	setup_thread_stack(tsk, orig);
+#ifdef CONFIG_KSU_SUSFS
+	ksu_susfs_reset_fork_state(tsk);
+#endif
 	clear_user_return_notifier(tsk);
 	clear_tsk_need_resched(tsk);
 	set_task_stack_end_magic(tsk);

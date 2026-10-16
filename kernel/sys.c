@@ -62,6 +62,9 @@
 #include <linux/rcupdate.h>
 #include <linux/uidgid.h>
 #include <linux/cred.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/ksu_susfs.h>
+#endif
 
 #include <linux/nospec.h>
 
@@ -681,6 +684,15 @@ long __sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 	if (retval < 0)
 		goto error;
 
+#ifdef CONFIG_KSU_SUSFS
+	/* All fallible UID/LSM checks passed; commit_creds() always returns 0. */
+	if (ns == &init_user_ns && ruid != (uid_t)-1 &&
+	    ruid == euid && euid == suid &&
+	    (!uid_eq(new->uid, old->uid) || !uid_eq(new->euid, old->euid) ||
+	     !uid_eq(new->suid, old->suid)))
+		(void)ksu_handle_setresuid(ruid, euid, suid);
+#endif
+
 	return commit_creds(new);
 
 error:
@@ -1240,12 +1252,19 @@ static int override_release(char __user *release, size_t len)
 	return ret;
 }
 
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+#include <linux/susfs_spoof.h>
+#endif
+
 SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 {
 	struct new_utsname tmp;
 
 	down_read(&uts_sem);
 	memcpy(&tmp, utsname(), sizeof(tmp));
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+	susfs_spoof_uname(&tmp);
+#endif
 	up_read(&uts_sem);
 	if (copy_to_user(name, &tmp, sizeof(tmp)))
 		return -EFAULT;

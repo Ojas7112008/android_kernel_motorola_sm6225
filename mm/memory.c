@@ -69,6 +69,9 @@
 #include <linux/userfaultfd_k.h>
 #include <linux/dax.h>
 #include <linux/oom.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+#include <linux/susfs_map.h>
+#endif
 
 #include <trace/events/kmem.h>
 
@@ -4493,6 +4496,12 @@ int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
 		void *maddr;
 		struct page *page = NULL;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		/* Refresh at every page; a read may cross into a hidden mapping. */
+		vma = find_vma(mm, addr);
+		if (vma && addr >= vma->vm_start && susfs_is_hidden_vma(vma))
+			break;
+#endif
 		ret = get_user_pages_remote(tsk, mm, addr, 1,
 				gup_flags, &page, &vma, NULL);
 		if (ret <= 0) {
@@ -4506,9 +4515,17 @@ int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
 			vma = find_vma(mm, addr);
 			if (!vma || vma->vm_start > addr)
 				break;
-			if (vma->vm_ops && vma->vm_ops->access)
+			if (vma->vm_ops && vma->vm_ops->access) {
+				int access_len = len;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+				if (susfs_is_current_proc_umounted_app())
+					access_len = min_t(unsigned long, len,
+							vma->vm_end - addr);
+#endif
 				ret = vma->vm_ops->access(vma, addr, buf,
-							  len, write);
+							  access_len, write);
+			}
 			if (ret <= 0)
 				break;
 			bytes = ret;

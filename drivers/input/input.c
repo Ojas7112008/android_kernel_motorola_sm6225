@@ -29,6 +29,10 @@
 #include <linux/rcupdate.h>
 #include "input-compat.h"
 
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/ksu_susfs.h>
+#endif
+
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
 MODULE_DESCRIPTION("Input core");
 MODULE_LICENSE("GPL");
@@ -382,6 +386,17 @@ static void input_handle_event(struct input_dev *dev,
 			       unsigned int type, unsigned int code, int value)
 {
 	int disposition = input_get_disposition(dev, type, code, &value);
+
+#ifdef CONFIG_KSU_SUSFS
+	/* Observe real press edges without changing native input delivery. */
+	if ((disposition & INPUT_PASS_TO_HANDLERS) &&
+	    type == EV_KEY && code == KEY_VOLUMEDOWN && value == 1) {
+		unsigned int hook_type = type, hook_code = code;
+		int hook_value = value;
+
+		ksu_handle_input_handle_event(&hook_type, &hook_code, &hook_value);
+	}
+#endif
 
 	if (disposition != INPUT_IGNORE_EVENT && type != EV_SYN)
 		add_input_randomness(type, code, value);

@@ -12,6 +12,12 @@
 #include <linux/fs.h>
 
 #include <linux/proc_fs.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/susfs_mount.h>
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+#include <linux/susfs_meta.h>
+#endif
 
 #include "../mount.h"
 #include "internal.h"
@@ -53,9 +59,33 @@ static int seq_show(struct seq_file *m, void *v)
 	if (ret)
 		return ret;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	{
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+		int mnt_id = susfs_mnt_hide_current() ?
+			susfs_mnt_nonhidden_id(file->f_path.mnt) :
+			susfs_mnt_id(file->f_path.mnt);
+#else
+		int mnt_id = real_mount(file->f_path.mnt)->mnt_id;
+#endif
+		unsigned long ino = file_inode(file)->i_ino;
+
+		susfs_spoof_inode_ids(file_inode(file), NULL, &ino, &mnt_id);
+		seq_printf(m, "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\nino:\t%lu\n",
+			   (long long)file->f_pos, f_flags, mnt_id, ino);
+	}
+#else
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	seq_printf(m, "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\n",
+		   (long long)file->f_pos, f_flags,
+		   susfs_mnt_hide_current() ? susfs_mnt_nonhidden_id(file->f_path.mnt) :
+					     susfs_mnt_id(file->f_path.mnt));
+#else
 	seq_printf(m, "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\n",
 		   (long long)file->f_pos, f_flags,
 		   real_mount(file->f_path.mnt)->mnt_id);
+#endif
+#endif
 
 	show_fd_locks(m, file, files);
 	if (seq_has_overflowed(m))

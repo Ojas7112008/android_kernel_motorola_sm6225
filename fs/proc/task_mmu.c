@@ -19,6 +19,15 @@
 #include <linux/shmem_fs.h>
 #include <linux/uaccess.h>
 #include <linux/pkeys.h>
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+#include <linux/susfs_redirect.h>
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+#include <linux/susfs_meta.h>
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+#include <linux/susfs_map.h>
+#endif
 #include <linux/mm_inline.h>
 #include <linux/ctype.h>
 
@@ -359,12 +368,30 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 	unsigned long start, end;
 	dev_t dev = 0;
 	const char *name = NULL;
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	struct susfs_redirect_view redirect_view;
+	bool redirected = false;
+#endif
 
 	if (file) {
 		struct inode *inode = file_inode(vma->vm_file);
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		if (susfs_is_hidden_vma(vma))
+			return;
+#endif
 		dev = inode->i_sb->s_dev;
 		ino = inode->i_ino;
 		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+		susfs_spoof_inode_ids(inode, &dev, &ino, NULL);
+#endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+		redirected = susfs_redirect_view(inode, &redirect_view);
+		if (redirected) {
+			dev = redirect_view.dev;
+			ino = redirect_view.ino;
+		}
+#endif
 	}
 
 	start = vma->vm_start;
@@ -377,6 +404,11 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 	 */
 	if (file) {
 		seq_pad(m, ' ');
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+		if (redirected)
+			seq_escape(m, redirect_view.name, "\n");
+		else
+#endif
 		seq_file_path(m, file, "\n");
 		goto done;
 	}
@@ -847,6 +879,12 @@ static int show_smap(struct seq_file *m, void *v)
 	struct vm_area_struct *vma = v;
 	struct mem_size_stats mss;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	if (susfs_is_hidden_vma(vma)) {
+		m_cache_vma(m, vma);
+		return 0;
+	}
+#endif
 	memset(&mss, 0, sizeof(mss));
 
 	smap_gather_stats(vma, &mss);
@@ -883,6 +921,10 @@ static int show_smaps_rollup(struct seq_file *m, void *v)
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 	unsigned long last_vma_end = 0;
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	unsigned long first_vma_start = 0;
+	bool first_vma_seen = false;
+#endif
 	int ret = 0;
 
 	priv->task = get_proc_task(priv->inode);
@@ -904,11 +946,23 @@ static int show_smaps_rollup(struct seq_file *m, void *v)
 	hold_task_mempolicy(priv);
 
 	for (vma = priv->mm->mmap; vma; vma = vma->vm_next) {
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		if (susfs_is_hidden_vma(vma))
+			continue;
+		if (!first_vma_seen) {
+			first_vma_start = vma->vm_start;
+			first_vma_seen = true;
+		}
+#endif
 		smap_gather_stats(vma, &mss);
 		last_vma_end = vma->vm_end;
 	}
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	show_vma_header_prefix(m, first_vma_start,
+#else
 	show_vma_header_prefix(m, priv->mm->mmap ? priv->mm->mmap->vm_start : 0,
+#endif
 			       last_vma_end, 0, 0, 0, 0);
 	seq_pad(m, ' ');
 	seq_puts(m, "[rollup]\n");
@@ -1303,6 +1357,23 @@ static int add_to_pagemap(unsigned long addr, pagemap_entry_t *pme,
 	return 0;
 }
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+static int susfs_pagemap_hidden_range(unsigned long addr, unsigned long end,
+				      struct pagemapread *pm)
+{
+	pagemap_entry_t empty = make_pme(0, 0);
+	int ret;
+
+	/* Preserve one entry per virtual page, including hidden pages. */
+	for (; addr < end; addr += PAGE_SIZE) {
+		ret = add_to_pagemap(addr, &empty, pm);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+#endif
+
 static int pagemap_pte_hole(unsigned long start, unsigned long end,
 				struct mm_walk *walk)
 {
@@ -1331,8 +1402,12 @@ static int pagemap_pte_hole(unsigned long start, unsigned long end,
 			break;
 
 		/* Addresses in the VMA. */
-		if (vma->vm_flags & VM_SOFTDIRTY)
+		if (vma->vm_flags & VM_SOFTDIRTY) {
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+			if (!susfs_is_hidden_vma(vma))
+#endif
 			pme = make_pme(0, PM_SOFT_DIRTY);
+		}
 		for (; addr < min(end, vma->vm_end); addr += PAGE_SIZE) {
 			err = add_to_pagemap(addr, &pme, pm);
 			if (err)
@@ -1390,6 +1465,11 @@ static int pagemap_pmd_range(pmd_t *pmdp, unsigned long addr, unsigned long end,
 	spinlock_t *ptl;
 	pte_t *pte, *orig_pte;
 	int err = 0;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	if (susfs_is_hidden_vma(vma))
+		return susfs_pagemap_hidden_range(addr, end, pm);
+#endif
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	ptl = pmd_trans_huge_lock(pmdp, vma);
@@ -1486,6 +1566,10 @@ static int pagemap_hugetlb_range(pte_t *ptep, unsigned long hmask,
 	int err = 0;
 	pte_t pte;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	if (susfs_is_hidden_vma(vma))
+		return susfs_pagemap_hidden_range(addr, end, pm);
+#endif
 	if (vma->vm_flags & VM_SOFTDIRTY)
 		flags |= PM_SOFT_DIRTY;
 
@@ -2195,6 +2279,12 @@ static int show_numa_map(struct seq_file *m, void *v)
 	if (!mm)
 		return 0;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	if (susfs_is_hidden_vma(vma)) {
+		m_cache_vma(m, vma);
+		return 0;
+	}
+#endif
 	/* Ensure we start with an empty set of numa_maps statistics. */
 	memset(md, 0, sizeof(*md));
 

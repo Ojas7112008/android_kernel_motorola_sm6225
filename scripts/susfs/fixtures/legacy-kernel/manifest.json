@@ -1,0 +1,12 @@
+{
+  "commit": "18bd9752ada79090ce11326662eaaa9f33717728",
+  "purpose": "Historical negative controls only; never compiled into the kernel",
+  "files": {
+    "fs/exec.c": "5b341a54362c2971430b7a025b37bda67f042a4cdf813f8dfa3fcc07b7ac4922",
+    "fs/stat.c": "7916d7bbab2bb4a70283c8b23ffe0a1a97c62916b9fcb93cbaa0413caf1770b4",
+    "fs/open.c": "eea0a50cff5ed8b2350df96fcc42d93224a471b3ae2fd8c3abdd5a6cf803f303",
+    "kernel/sys.c": "2290095eab2a0ec4f4f956fb43c609886aa1885dd70f27c6f5dcb75014b5b6b8",
+    "kernel/reboot.c": "ff93d8626a4810ecb9a7cb63d8f766e7dc441dcf51f0ce737aaaa3e96429e14a",
+    "drivers/input/input.c": "743b761d750eaafcebd4d8db09736cf6601e0a0300c6e98c663f78eb7db2d490"
+  }
+}

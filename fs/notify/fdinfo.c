@@ -13,6 +13,12 @@
 #include <linux/seq_file.h>
 #include <linux/proc_fs.h>
 #include <linux/exportfs.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/susfs_mount.h>
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+#include <linux/susfs_meta.h>
+#endif
 
 #include "inotify/inotify.h"
 #include "fsnotify.h"
@@ -83,9 +89,18 @@ static void inotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark)
 	inode_mark = container_of(mark, struct inotify_inode_mark, fsn_mark);
 	inode = igrab(fsnotify_conn_inode(mark->connector));
 	if (inode) {
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+		unsigned long ino = inode->i_ino;
+		dev_t dev = inode->i_sb->s_dev;
+
+		susfs_spoof_inode_ids(inode, &dev, &ino, NULL);
+		seq_printf(m, "inotify wd:%x ino:%lx sdev:%x mask:%x ignored_mask:0 ",
+			   inode_mark->wd, ino, dev, inotify_mark_user_mask(mark));
+#else
 		seq_printf(m, "inotify wd:%x ino:%lx sdev:%x mask:%x ignored_mask:0 ",
 			   inode_mark->wd, inode->i_ino, inode->i_sb->s_dev,
 			   inotify_mark_user_mask(mark));
+#endif
 		show_mark_fhandle(m, inode);
 		seq_putc(m, '\n');
 		iput(inode);
@@ -123,7 +138,13 @@ static void fanotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark)
 		struct mount *mnt = fsnotify_conn_mount(mark->connector);
 
 		seq_printf(m, "fanotify mnt_id:%x mflags:%x mask:%x ignored_mask:%x\n",
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+			   susfs_mnt_hide_current() ? susfs_mnt_nonhidden_id(&mnt->mnt) :
+						     susfs_mnt_id(&mnt->mnt),
+			   mflags, mark->mask, mark->ignored_mask);
+#else
 			   mnt->mnt_id, mflags, mark->mask, mark->ignored_mask);
+#endif
 	}
 }
 

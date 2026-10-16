@@ -37,6 +37,10 @@
 #include <linux/lockdep.h>
 #include <linux/user_namespace.h>
 #include <linux/fs_context.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/susfs_def.h>
+extern bool susfs_is_current_ksu_domain(void);
+#endif
 #include "internal.h"
 
 static int thaw_super_locked(struct super_block *sb);
@@ -1119,8 +1123,15 @@ int get_anon_bdev(dev_t *p)
 	 * Many userspace utilities consider an FSID of 0 invalid.
 	 * Always return at least 1 from get_anon_bdev.
 	 */
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	dev = ida_alloc_range(&unnamed_dev_ida,
+			     susfs_is_current_ksu_domain() ? DEFAULT_KSU_MNT_MINOR_DEV : 1,
+			     (1 << MINORBITS) - 1,
+			     GFP_ATOMIC);
+#else
 	dev = ida_alloc_range(&unnamed_dev_ida, 1, (1 << MINORBITS) - 1,
 			GFP_ATOMIC);
+#endif
 	if (dev == -ENOSPC)
 		dev = -EMFILE;
 	if (dev < 0)

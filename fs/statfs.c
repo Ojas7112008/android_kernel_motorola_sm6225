@@ -9,6 +9,12 @@
 #include <linux/security.h>
 #include <linux/uaccess.h>
 #include <linux/compat.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/susfs_mount.h>
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+#include <linux/susfs_meta.h>
+#endif
 #include "internal.h"
 
 static int flags_by_mnt(int mnt_flags)
@@ -71,12 +77,62 @@ int vfs_statfs(const struct path *path, struct kstatfs *buf)
 {
 	int error;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	if (susfs_mnt_hide_current() && susfs_mnt_hidden(path->mnt)) {
+		struct path visible;
+
+		/* Preserve the original target's LSM decision before the view lookup. */
+		error = security_sb_statfs(path->dentry);
+		if (error)
+			return error;
+		if (!susfs_mnt_visible_root(path->mnt, &visible)) {
+			error = statfs_by_dentry(visible.dentry, buf);
+			if (!error)
+				buf->f_flags = calculate_f_flags(visible.mnt);
+			path_put(&visible);
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+			if (!error)
+				susfs_spoof_statfs(d_backing_inode(path->dentry), buf);
+#endif
+			return error;
+		}
+	}
+#endif
 	error = statfs_by_dentry(path->dentry, buf);
+	if (!error)
+		buf->f_flags = calculate_f_flags(path->mnt);
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	if (!error)
+		susfs_spoof_statfs(d_backing_inode(path->dentry), buf);
+#endif
+	return error;
+}
+EXPORT_SYMBOL(vfs_statfs);
+
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+int susfs_statfs_snapshot(const struct path *path, struct kstatfs *buf)
+{
+	int error;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	struct path visible;
+
+	if (susfs_mnt_hidden(path->mnt) &&
+	    !susfs_mnt_visible_root(path->mnt, &visible)) {
+		error = statfs_by_dentry(visible.dentry, buf);
+		if (!error)
+			buf->f_flags = calculate_f_flags(visible.mnt);
+		path_put(&visible);
+		return error;
+	}
+#endif
+	error = statfs_by_dentry(path->dentry, buf);
+
 	if (!error)
 		buf->f_flags = calculate_f_flags(path->mnt);
 	return error;
 }
-EXPORT_SYMBOL(vfs_statfs);
+#endif
 
 int user_statfs(const char __user *pathname, struct kstatfs *st)
 {

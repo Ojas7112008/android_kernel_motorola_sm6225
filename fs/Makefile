@@ -22,6 +22,14 @@ obj-y +=	no-block.o
 endif
 
 obj-$(CONFIG_PROC_FS) += proc_namespace.o
+obj-$(CONFIG_KSU_SUSFS)		+= susfs.o
+obj-$(CONFIG_KSU_SUSFS_SPOOF_UNAME) += susfs_uname.o
+obj-$(CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG) += susfs_cmdline.o
+obj-$(CONFIG_KSU_SUSFS_SUS_MAP) += susfs_map.o
+obj-$(CONFIG_KSU_SUSFS_SUS_KSTAT) += susfs_kstat.o
+obj-$(CONFIG_KSU_SUSFS_OPEN_REDIRECT) += susfs_redirect.o
+obj-$(CONFIG_KSU_SUSFS_SUS_MOUNT) += susfs_mount.o
+obj-$(CONFIG_KSU_SUSFS_SUS_PATH)	+= susfs_path.o susfs_fuse.o
 
 obj-y				+= notify/
 obj-$(CONFIG_EPOLL)		+= eventpoll.o

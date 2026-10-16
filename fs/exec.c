@@ -1895,12 +1895,46 @@ out_ret:
 	return retval;
 }
 
+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+__attribute__((hot))
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+                               void *argv, void *envp, int *flags);
+__attribute__((hot))
+extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
+                                    void *argv, void *envp, int *flags,
+                                    int *retval);
+#endif
+
 static int do_execveat_common(int fd, struct filename *filename,
 			      struct user_arg_ptr argv,
 			      struct user_arg_ptr envp,
 			      int flags)
 {
-	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+    int retval;
+
+    ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+
+    /* __do_execve_file() consumes the filename on success and failure. */
+    {
+        struct filename *hook_filename = filename;
+
+        if (!IS_ERR_OR_NULL(hook_filename))
+            hook_filename->refcnt++;
+
+        retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
+
+        if (!IS_ERR_OR_NULL(hook_filename)) {
+            ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags,
+                                     &retval);
+            putname(hook_filename);
+        }
+    }
+
+    return retval;
+#else
+    return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+#endif
 }
 
 int do_execve_file(struct file *file, void *__argv, void *__envp)

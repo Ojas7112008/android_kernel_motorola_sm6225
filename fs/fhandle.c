@@ -11,6 +11,9 @@
 #include <linux/personality.h>
 #include <linux/uaccess.h>
 #include <linux/compat.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/susfs_mount.h>
+#endif
 #include "internal.h"
 #include "mount.h"
 
@@ -23,6 +26,11 @@ static long do_sys_name_to_handle(struct path *path,
 	int handle_dwords, handle_bytes;
 	struct file_handle *handle = NULL;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	/* Do not pair a hidden filesystem's handle with an unrelated visible ID. */
+	if (susfs_mnt_hide_current() && susfs_mnt_hidden(path->mnt))
+		return -ENOENT;
+#endif
 	/*
 	 * We need to make sure whether the file system
 	 * support decoding of the file handle
@@ -69,7 +77,11 @@ static long do_sys_name_to_handle(struct path *path,
 	} else
 		retval = 0;
 	/* copy the mount id */
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	if (put_user(susfs_mnt_id(path->mnt), mnt_id) ||
+#else
 	if (put_user(real_mount(path->mnt)->mnt_id, mnt_id) ||
+#endif
 	    copy_to_user(ufh, handle,
 			 sizeof(struct file_handle) + handle_bytes))
 		retval = -EFAULT;

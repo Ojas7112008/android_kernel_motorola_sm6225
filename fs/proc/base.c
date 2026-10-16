@@ -95,6 +95,12 @@
 #include <linux/flex_array.h>
 #include <linux/posix-timers.h>
 #include <linux/cpufreq_times.h>
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+#include <linux/susfs_redirect.h>
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+#include <linux/susfs_map.h>
+#endif
 #include <trace/events/oom.h>
 #include "internal.h"
 #include "fd.h"
@@ -1898,6 +1904,11 @@ static int do_proc_readlink(struct path *path, char __user *buffer, int buflen)
 	len = PTR_ERR(pathname);
 	if (IS_ERR(pathname))
 		goto out;
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	len = susfs_redirect_readlink(d_backing_inode(path->dentry), buffer, buflen);
+	if (len != -ENOENT)
+		goto out;
+#endif
 	len = tmp + PAGE_SIZE - 1 - pathname;
 
 	if (len > buflen)
@@ -2234,8 +2245,15 @@ static int map_files_d_revalidate(struct dentry *dentry, unsigned int flags)
 	if (!dname_to_vma_addr(dentry, &vm_start, &vm_end)) {
 		status = mmap_read_lock_killable(mm);
 		if (!status) {
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+			struct vm_area_struct *vma;
+
+			vma = find_exact_vma(mm, vm_start, vm_end);
+			exact_vma_exists = vma && !susfs_is_hidden_vma(vma);
+#else
 			exact_vma_exists = !!find_exact_vma(mm, vm_start,
 							    vm_end);
+#endif
 			mmap_read_unlock(mm);
 		}
 	}
@@ -2290,10 +2308,17 @@ static int map_files_get_link(struct dentry *dentry, struct path *path)
 	rc = -ENOENT;
 	vma = find_exact_vma(mm, vm_start, vm_end);
 	if (vma && vma->vm_file) {
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		if (susfs_is_hidden_vma(vma))
+			goto out_unlock;
+#endif
 		*path = vma->vm_file->f_path;
 		path_get(path);
 		rc = 0;
 	}
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+out_unlock:
+#endif
 	mmap_read_unlock(mm);
 
 out_mmput:
@@ -2392,6 +2417,10 @@ static struct dentry *proc_map_files_lookup(struct inode *dir,
 	if (!vma)
 		goto out_no_vma;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	if (susfs_is_hidden_vma(vma))
+		goto out_no_vma;
+#endif
 	if (vma->vm_file)
 		result = proc_map_files_instantiate(dentry, task,
 				(void *)(unsigned long)vma->vm_file->f_mode);
@@ -2480,6 +2509,10 @@ proc_map_files_readdir(struct file *file, struct dir_context *ctx)
 				vma = vma->vm_next) {
 			if (!vma->vm_file)
 				continue;
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+			if (susfs_is_hidden_vma(vma))
+				continue;
+#endif
 			if (++pos <= ctx->pos)
 				continue;
 
@@ -2489,6 +2522,10 @@ proc_map_files_readdir(struct file *file, struct dir_context *ctx)
 			if (flex_array_put(fa, i++, &info, GFP_KERNEL))
 				BUG();
 		}
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		/* Marking may change between passes; emit only initialized entries. */
+		nr_files = i;
+#endif
 	}
 	mmap_read_unlock(mm);
 	mmput(mm);

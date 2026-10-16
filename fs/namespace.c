@@ -27,9 +27,18 @@
 #include <linux/task_work.h>
 #include <linux/sched/task.h>
 #include <linux/fs_context.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/refcount.h>
+#include <linux/susfs_def.h>
+#include <linux/susfs_mount.h>
+#endif
 
 #include "pnode.h"
 #include "internal.h"
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern bool susfs_is_current_ksu_domain(void);
+#define CL_COPY_MNT_NS BIT(25)
+#endif
 
 /* Maximum number of mounts in a mount namespace */
 unsigned int sysctl_mount_max __read_mostly = 100000;
@@ -97,19 +106,88 @@ static inline struct hlist_head *mp_hash(struct dentry *dentry)
 	return &mountpoint_hashtable[tmp & mp_hash_mask];
 }
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+/* Extra state belongs to the allocation, not the shared native mount type. */
+struct susfs_mount {
+	struct mount mount;
+	int susfs_mnt_id;
+	bool susfs_hidden;
+	struct susfs_mnt_id_owner *susfs_id_owner;
+	struct susfs_mnt_id_owner *susfs_view_owner;
+};
+
+static struct susfs_mount *susfs_mount_data(struct mount *mnt)
+{
+	return container_of(mnt, struct susfs_mount, mount);
+}
+
+struct susfs_mnt_id_owner {
+	refcount_t refs;
+	int id;
+};
+
+static struct susfs_mnt_id_owner *susfs_alloc_mnt_id(bool reserved)
+{
+	struct susfs_mnt_id_owner *owner;
+	int id;
+
+	owner = kmalloc(sizeof(*owner), GFP_KERNEL);
+	if (!owner)
+		return ERR_PTR(-ENOMEM);
+	id = ida_alloc_range(&mnt_id_ida, reserved ? DEFAULT_KSU_MNT_ID : 0,
+			     reserved ? INT_MAX : DEFAULT_KSU_MNT_ID - 1, GFP_KERNEL);
+	if (id < 0) {
+		kfree(owner);
+		return ERR_PTR(id);
+	}
+	owner->id = id;
+	refcount_set(&owner->refs, 1);
+	return owner;
+}
+
+static void susfs_put_mnt_id(struct susfs_mnt_id_owner *owner)
+{
+	if (owner && refcount_dec_and_test(&owner->refs)) {
+		ida_free(&mnt_id_ida, owner->id);
+		kfree(owner);
+	}
+}
+
+#endif
 static int mnt_alloc_id(struct mount *mnt)
 {
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	bool ksu = susfs_is_current_ksu_domain();
+	struct susfs_mnt_id_owner *owner = susfs_alloc_mnt_id(ksu);
+	int res;
+
+	if (IS_ERR(owner))
+		return PTR_ERR(owner);
+	susfs_mount_data(mnt)->susfs_id_owner = owner;
+	res = owner->id;
+#else
 	int res = ida_alloc(&mnt_id_ida, GFP_KERNEL);
+#endif
 
 	if (res < 0)
 		return res;
 	mnt->mnt_id = res;
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	susfs_mount_data(mnt)->susfs_mnt_id = res;
+	susfs_mount_data(mnt)->susfs_hidden = ksu;
+#endif
 	return 0;
 }
 
 static void mnt_free_id(struct mount *mnt)
 {
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	/* A namespace view may outlive the original physical mount. */
+	susfs_put_mnt_id(susfs_mount_data(mnt)->susfs_view_owner);
+	susfs_put_mnt_id(susfs_mount_data(mnt)->susfs_id_owner);
+#else
 	ida_free(&mnt_id_ida, mnt->mnt_id);
+#endif
 }
 
 /*
@@ -117,7 +195,15 @@ static void mnt_free_id(struct mount *mnt)
  */
 static int mnt_alloc_group_id(struct mount *mnt)
 {
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	bool ksu = susfs_is_current_ksu_domain();
+	int res = ida_alloc_range(&mnt_group_ida,
+				 ksu ? DEFAULT_KSU_MNT_GROUP_ID : 1,
+				 ksu ? INT_MAX : DEFAULT_KSU_MNT_GROUP_ID - 1,
+				 GFP_KERNEL);
+#else
 	int res = ida_alloc_min(&mnt_group_ida, 1, GFP_KERNEL);
+#endif
 
 	if (res < 0)
 		return res;
@@ -602,6 +688,11 @@ struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
 	struct mount *p;
 
 	hlist_for_each_entry_rcu(p, head, mnt_hash)
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+		if (susfs_mnt_hide_current() && susfs_mount_data(p)->susfs_hidden)
+			continue;
+		else
+#endif
 		if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
 			return p;
 	return NULL;
@@ -1032,6 +1123,37 @@ vfs_submount(const struct dentry *mountpoint, struct file_system_type *type,
 }
 EXPORT_SYMBOL_GPL(vfs_submount);
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+static int susfs_clone_mnt_id(struct mount *mnt, struct mount *old, int flags)
+{
+	bool ksu = susfs_is_current_ksu_domain();
+	bool ns_copy = ksu && (flags & CL_COPY_MNT_NS);
+	bool hidden = susfs_mount_data(old)->susfs_hidden || (ksu && !ns_copy);
+	bool reserved = hidden || ns_copy;
+	struct susfs_mnt_id_owner *owner;
+
+	if ((mnt->mnt_id >= DEFAULT_KSU_MNT_ID) != reserved) {
+		owner = susfs_alloc_mnt_id(reserved);
+		if (IS_ERR(owner))
+			return PTR_ERR(owner);
+		/* Allocate first: every unwind still owns exactly one physical ID. */
+		susfs_put_mnt_id(susfs_mount_data(mnt)->susfs_id_owner);
+		susfs_mount_data(mnt)->susfs_id_owner = owner;
+		mnt->mnt_id = owner->id;
+	}
+	susfs_mount_data(mnt)->susfs_hidden = hidden;
+	susfs_mount_data(mnt)->susfs_mnt_id = ns_copy && !hidden ?
+		susfs_mount_data(old)->susfs_mnt_id : mnt->mnt_id;
+	if (ns_copy && !hidden) {
+		owner = susfs_mount_data(old)->susfs_view_owner ?:
+			susfs_mount_data(old)->susfs_id_owner;
+		refcount_inc(&owner->refs);
+		susfs_mount_data(mnt)->susfs_view_owner = owner;
+	}
+	return 0;
+}
+
+#endif
 static struct mount *clone_mnt(struct mount *old, struct dentry *root,
 					int flag)
 {
@@ -1043,6 +1165,11 @@ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
 	if (!mnt)
 		return ERR_PTR(-ENOMEM);
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	err = susfs_clone_mnt_id(mnt, old, flag);
+	if (err)
+		goto out_free;
+#endif
 	if (sb->s_op->clone_mnt_data) {
 		mnt->mnt.data = sb->s_op->clone_mnt_data(old->mnt.data);
 		if (!mnt->mnt.data) {
@@ -3072,6 +3199,9 @@ struct mnt_namespace *copy_mnt_ns(unsigned long flags, struct mnt_namespace *ns,
 	namespace_lock();
 	/* First pass: copy the tree topology */
 	copy_flags = CL_COPY_UNBINDABLE | CL_EXPIRE;
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	copy_flags |= CL_COPY_MNT_NS;
+#endif
 	if (user_ns != ns->user_ns)
 		copy_flags |= CL_SHARED_TO_SLAVE | CL_UNPRIVILEGED;
 	new = copy_tree(old, old->mnt.mnt_root, copy_flags);
@@ -3386,8 +3516,13 @@ void __init mnt_init(void)
 {
 	int err;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	mnt_cache = kmem_cache_create("mnt_cache", sizeof(struct susfs_mount),
+				      0, SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);
+#else
 	mnt_cache = kmem_cache_create("mnt_cache", sizeof(struct mount),
 			0, SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);
+#endif
 
 	mount_hashtable = alloc_large_system_hash("Mount-cache",
 				sizeof(struct hlist_head),
@@ -3652,3 +3787,75 @@ const struct proc_ns_operations mntns_operations = {
 	.install	= mntns_install,
 	.owner		= mntns_owner,
 };
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+bool susfs_mnt_hidden(struct vfsmount *mnt)
+{
+	return READ_ONCE(susfs_mount_data(real_mount(mnt))->susfs_hidden);
+}
+
+int susfs_mnt_id(struct vfsmount *mnt)
+{
+	return susfs_mount_data(real_mount(mnt))->susfs_mnt_id;
+}
+
+/* Caller holds mount_lock. Self-parent roots and a bounded walk terminate. */
+static struct mount *susfs_visible_mount_locked(struct mount *mnt)
+{
+	unsigned int remaining = max_t(unsigned int, READ_ONCE(sysctl_mount_max), 1);
+
+	while (susfs_mount_data(mnt)->susfs_hidden) {
+		if (!remaining-- || !mnt->mnt_parent || mnt == mnt->mnt_parent)
+			return NULL;
+		mnt = mnt->mnt_parent;
+	}
+	return mnt;
+}
+
+int susfs_mnt_nonhidden_id(struct vfsmount *mnt)
+{
+	struct mount *visible;
+	int id = susfs_mnt_id(mnt);
+
+	lock_mount_hash();
+	visible = susfs_visible_mount_locked(real_mount(mnt));
+	if (visible)
+		id = susfs_mount_data(visible)->susfs_mnt_id;
+	unlock_mount_hash();
+	return id;
+}
+
+int susfs_mnt_parent_id(struct vfsmount *mnt)
+{
+	struct mount *parent;
+	int id;
+	bool hide = susfs_mnt_hide_proc();
+
+	lock_mount_hash();
+	parent = real_mount(mnt)->mnt_parent;
+	id = susfs_mount_data(parent)->susfs_mnt_id;
+	if (hide) {
+		parent = susfs_visible_mount_locked(parent);
+		if (parent)
+			id = susfs_mount_data(parent)->susfs_mnt_id;
+	}
+	unlock_mount_hash();
+	return id;
+}
+
+int susfs_mnt_visible_root(struct vfsmount *mnt, struct path *path)
+{
+	struct mount *visible;
+	int err = -ENOENT;
+
+	lock_mount_hash();
+	visible = susfs_visible_mount_locked(real_mount(mnt));
+	if (visible && visible->mnt.mnt_root) {
+		path->mnt = mntget(&visible->mnt);
+		path->dentry = dget(visible->mnt.mnt_root);
+		err = 0;
+	}
+	unlock_mount_hash();
+	return err;
+}
+#endif

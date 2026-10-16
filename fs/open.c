@@ -31,6 +31,9 @@
 #include <linux/ima.h>
 #include <linux/dnotify.h>
 #include <linux/compat.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/ksu_susfs.h>
+#endif
 
 #include "internal.h"
 #include <trace/hooks/syscall_check.h>
@@ -363,6 +366,9 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
 	struct vfsmount *mnt;
 	int res;
 	unsigned int lookup_flags = LOOKUP_FOLLOW;
+#ifdef CONFIG_KSU_SUSFS
+	struct filename *fname;
+#endif
 
 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
 		return -EINVAL;
@@ -405,7 +411,22 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
 
 	old_cred = override_creds(override_cred);
 retry:
+#ifdef CONFIG_KSU_SUSFS
+	fname = getname_flags(filename, lookup_flags, NULL);
+	if (IS_ERR(fname)) {
+		res = PTR_ERR(fname);
+		goto out;
+	}
+	res = ksu_handle_faccessat(&dfd, &fname, &mode, NULL);
+	if (res) {
+		putname(fname);
+		goto out;
+	}
+	/* filename_lookup() consumes fname, including its failure paths. */
+	res = filename_lookup(dfd, fname, lookup_flags, &path, NULL);
+#else
 	res = user_path_at(dfd, filename, lookup_flags, &path);
+#endif
 	if (res)
 		goto out;
 
@@ -451,9 +472,19 @@ out:
 	return res;
 }
 
+#ifdef CONFIG_KSU_MANUAL_HOOK
+__attribute__((hot))
+extern int ksu_handle_faccessat(int *dfd,
+                                const char __user **filename_user,
+                                int *mode, int *flags);
+#endif
+
 SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
 {
-	return do_faccessat(dfd, filename, mode);
+#ifdef CONFIG_KSU_MANUAL_HOOK
+    ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+#endif
+    return do_faccessat(dfd, filename, mode);
 }
 
 SYSCALL_DEFINE2(access, const char __user *, filename, int, mode)

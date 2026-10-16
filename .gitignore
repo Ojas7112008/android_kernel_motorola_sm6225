@@ -139,3 +139,14 @@ kernel/configs/android-*.cfg
 #Ignoring Android.bp link file
 #
 Android.bp
+
+# Local pinned dependency and limited SUSFS test-build outputs.
+/.backport-context/build/
+/out/susfs-core-test/
+/artifacts/susfs-core-test/
+/out/susfs-features-test/
+/artifacts/susfs-features-test/
+
+# Generated build outputs and local evidence
+/artifacts/
+/out/

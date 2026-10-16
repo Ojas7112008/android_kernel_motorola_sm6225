@@ -12,6 +12,9 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/fs.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/ksu_susfs.h>
+#endif
 #include <linux/security.h>
 #include <linux/cred.h>
 #include <linux/eventpoll.h>
@@ -275,6 +278,9 @@ static void __fput(struct file *file)
 		if (file->f_op->fasync)
 			file->f_op->fasync(-1, file, 0);
 	}
+#ifdef CONFIG_KSU_SUSFS
+	ksu_handle_initrc_file_release(file);
+#endif
 	if (file->f_op->release)
 		file->f_op->release(inode, file);
 	if (unlikely(S_ISCHR(inode->i_mode) && inode->i_cdev != NULL &&

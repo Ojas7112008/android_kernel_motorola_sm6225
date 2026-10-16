@@ -1,0 +1,47 @@
+name: Devon BakaSU (non-SUSFS)
+# Manual kernel builds only. No boot image, flashing or release publishing.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: devon-bakasu-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out lineage-23.2-bakasu
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: lineage-23.2-bakasu
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: recursive
+      - name: Free runner space and install build dependencies
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev python3 python3-yaml clang lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu rsync dwarves
+          df -h .
+      - name: Verify pinned Android Clang
+        run: python3 scripts/ci/install_toolchain.py
+      - name: Check filename ownership
+        run: python3 -B scripts/devon/test_exec_filename_lifetime.py
+      - name: Build Image, device trees and modules
+        env:
+          JOBS: '4'
+        run: bash scripts/devon/build-bakasu.sh
+      - name: Upload kernel outputs and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: devon-bakasu-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            artifacts/**
+            .backport-context/audit/all-features/**/*.json
+            .backport-context/audit/ci-host-checks/**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7

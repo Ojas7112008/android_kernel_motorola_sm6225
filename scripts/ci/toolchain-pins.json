@@ -1,0 +1,17 @@
+{
+  "toolchain": {
+    "url": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-16.0.0_r4/clang-r547379.tar.gz",
+    "commit": "9916fb51ccb914d62d35ad9a7b9b21d2ef046928",
+    "revision": "r547379",
+    "archive_sha256": "6350d387cbe6d75c1df1018da2a29c6bf1b233bd58e122e44f3ef5b16a90facc",
+    "files": {
+      "bin/clang": "55d80d777d85327543868817fb836231691eae2e13030ab31a01a769a820bf2f",
+      "bin/ld.lld": "55bfa2be5af6af9a3d9a17e310c501c0aca10f5431649988ed0a9a233c911652",
+      "bin/llvm-ar": "966d8ed2cab3fd3057398af43b3a07b91f1fd3482dc3713458808e6dd86396d6",
+      "bin/llvm-nm": "2f0682c4cbb29727b7039aad0b7fcbbf5a52de0bb7d0a3a6863ad1568383023a",
+      "bin/llvm-objcopy": "d2a3191ad2228bb60c35e18466615cb53ed7263c2e73134624349f0367cb1f88",
+      "bin/llvm-strip": "d2a3191ad2228bb60c35e18466615cb53ed7263c2e73134624349f0367cb1f88",
+      "bin/llvm-objdump": "3af14767b7a8fe24d82052d1c76b193b74205f8321ef7188ef9fd8866822491d"
+    }
+  }
+}

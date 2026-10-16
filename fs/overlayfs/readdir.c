@@ -17,6 +17,10 @@
 #include <linux/cred.h>
 #include <linux/ratelimit.h>
 #include "overlayfs.h"
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+#include <linux/susfs.h>
+#include <linux/overflow.h>
+#endif
 
 struct ovl_cache_entry {
 	unsigned int len;
@@ -59,6 +63,17 @@ struct ovl_dir_file {
 	struct list_head *cursor;
 	struct file *realfile;
 	struct file *upperfile;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	/* One accepted backing entry, pending publication to this open file. */
+	bool susfs_pending;
+	int susfs_len;
+	unsigned int susfs_type;
+	u64 susfs_ino;
+	loff_t susfs_offset;
+	loff_t susfs_next;
+	int susfs_error;
+	char susfs_name[NAME_MAX + 1];
+#endif
 };
 
 static struct ovl_cache_entry *ovl_cache_entry_from_node(struct rb_node *n)
@@ -352,6 +367,9 @@ static void ovl_dir_reset(struct file *file)
 		if (WARN_ON(is_real))
 			return;
 		od->is_real = false;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+		od->susfs_pending = false;
+#endif
 	}
 }
 
@@ -486,7 +504,11 @@ static int ovl_cache_update_ino(struct path *path, struct ovl_cache_entry *p)
 			goto get;
 		}
 	}
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	this = susfs_lookup_one_len_metadata(p->name, dir, p->len);
+#else
 	this = lookup_one_len(p->name, dir, p->len);
+#endif
 	if (IS_ERR_OR_NULL(this) || !this->d_inode) {
 		if (IS_ERR(this)) {
 			err = PTR_ERR(this);
@@ -730,6 +752,113 @@ static int ovl_iterate_real(struct file *file, struct dir_context *ctx)
 }
 
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+/* Merged iteration holds the overlay parent, not a backing directory lock.
+ * Resolve the view by name; neither raw nor remapped d_ino identifies it.
+ * Never store the caller's visibility decision in the shared dir cache.
+ */
+static int ovl_susfs_name_hidden(struct dentry *dir, const char *name, int len)
+{
+	struct dentry *child;
+	bool hidden;
+
+	if (!susfs_is_current_proc_umounted_app() ||
+	    (len == 1 && name[0] == '.') ||
+	    (len == 2 && name[0] == '.' && name[1] == '.'))
+		return false;
+	child = susfs_lookup_one_len_metadata(name, dir, len);
+	if (IS_ERR(child))
+		return PTR_ERR(child);
+	if (!child)
+		return -ENOENT;
+	/* A disappeared entry cannot expose a still-live marked view. */
+	hidden = !d_backing_inode(child) ||
+		susfs_is_inode_sus_path(d_backing_inode(child));
+	dput(child);
+	return hidden;
+}
+
+static int ovl_susfs_entry_hidden(struct dentry *dir, struct ovl_cache_entry *p)
+{
+	return ovl_susfs_name_hidden(dir, p->name, p->len);
+}
+
+struct ovl_susfs_collect {
+	struct dir_context ctx;
+	struct ovl_dir_file *od;
+	int error;
+};
+
+static int ovl_susfs_collect_one(struct dir_context *ctx, const char *name,
+				 int len, loff_t offset, u64 ino,
+				 unsigned int type)
+{
+	struct ovl_susfs_collect *collect =
+		container_of(ctx, struct ovl_susfs_collect, ctx);
+	struct ovl_dir_file *od = collect->od;
+
+	/* No lookup or policy decision while the backing iterator holds its lock. */
+	if (od->susfs_pending)
+		return -EINVAL;
+	if (len <= 0 || len > NAME_MAX || memchr(name, '/', len) ||
+	    memchr(name, '\0', len)) {
+		collect->error = -EIO;
+		return -EINVAL;
+	}
+	memcpy(od->susfs_name, name, len);
+	od->susfs_name[len] = '\0';
+	od->susfs_len = len;
+	od->susfs_offset = offset;
+	od->susfs_ino = ino;
+	od->susfs_type = type;
+	od->susfs_pending = true;
+	return 0;
+}
+
+static int ovl_susfs_iterate_real(struct file *file, struct dir_context *ctx)
+{
+	struct ovl_dir_file *od = file->private_data;
+	struct dentry *dir = file->f_path.dentry;
+	int err;
+
+	for (;;) {
+		if (!od->susfs_pending) {
+			struct ovl_susfs_collect collect = {
+				.ctx.actor = ovl_susfs_collect_one,
+				.od = od,
+			};
+
+			if (ovl_xino_bits(dir->d_sb) ||
+			    (ovl_same_sb(dir->d_sb) &&
+			     (ovl_is_impure_dir(file) ||
+			      OVL_TYPE_MERGE(ovl_path_type(dir->d_parent)))))
+				err = ovl_iterate_real(file, &collect.ctx);
+			else
+				err = iterate_dir(od->realfile, &collect.ctx);
+			od->susfs_next = collect.ctx.pos;
+			od->susfs_error = collect.error ?: err;
+			if (!od->susfs_pending) {
+				ctx->pos = collect.ctx.pos;
+				return od->susfs_error;
+			}
+		}
+		/* The overlay parent remains locked; the backing iterator has returned. */
+		err = ovl_susfs_name_hidden(dir, od->susfs_name, od->susfs_len);
+		if (err < 0)
+			return err;
+		ctx->pos = od->susfs_offset;
+		if (!err && ctx->actor(ctx, od->susfs_name, od->susfs_len,
+				       od->susfs_offset, od->susfs_ino, od->susfs_type))
+			return 0;
+		/* Consume only after filtering or successful publication. */
+		ctx->pos = od->susfs_next;
+		od->susfs_pending = false;
+		if (od->susfs_error)
+			return od->susfs_error;
+	}
+}
+
+#endif
 static int ovl_iterate(struct file *file, struct dir_context *ctx)
 {
 	struct ovl_dir_file *od = file->private_data;
@@ -741,6 +870,10 @@ static int ovl_iterate(struct file *file, struct dir_context *ctx)
 		ovl_dir_reset(file);
 
 	if (od->is_real) {
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+		if (od->susfs_pending || susfs_is_current_proc_umounted_app())
+			return ovl_susfs_iterate_real(file, ctx);
+#endif
 		/*
 		 * If parent is merge, then need to adjust d_ino for '..', if
 		 * dir is impure then need to adjust d_ino for copied up
@@ -769,6 +902,13 @@ static int ovl_iterate(struct file *file, struct dir_context *ctx)
 	while (od->cursor != &od->cache->entries) {
 		p = list_entry(od->cursor, struct ovl_cache_entry, l_node);
 		if (!p->is_whiteout) {
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+			err = ovl_susfs_entry_hidden(dentry, p);
+			if (err < 0)
+				return err;
+			if (err)
+				goto next;
+#endif
 			if (!p->ino) {
 				err = ovl_cache_update_ino(&file->f_path, p);
 				if (err)
@@ -777,6 +917,9 @@ static int ovl_iterate(struct file *file, struct dir_context *ctx)
 			if (!dir_emit(ctx, p->name, p->len, p->ino, p->type))
 				break;
 		}
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+next:
+#endif
 		od->cursor = p->l_node.next;
 		ctx->pos++;
 	}
@@ -793,8 +936,28 @@ static loff_t ovl_dir_llseek(struct file *file, loff_t offset, int origin)
 		ovl_dir_reset(file);
 
 	if (od->is_real) {
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+		if (od->susfs_pending && origin == SEEK_CUR) {
+			if (!offset) {
+				res = file->f_pos;
+				goto out_unlock;
+			}
+			if (check_add_overflow(file->f_pos, offset, &offset)) {
+				res = -EINVAL;
+				goto out_unlock;
+			}
+			origin = SEEK_SET;
+		}
+#endif
 		res = vfs_llseek(od->realfile, offset, origin);
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+		if (res >= 0) {
+			file->f_pos = od->realfile->f_pos;
+			od->susfs_pending = false;
+		}
+#else
 		file->f_pos = od->realfile->f_pos;
+#endif
 	} else {
 		res = -EINVAL;
 

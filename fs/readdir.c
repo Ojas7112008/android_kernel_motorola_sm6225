@@ -22,7 +22,51 @@
 #include <linux/compat.h>
 
 #include <linux/uaccess.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+#include <linux/magic.h>
+#include <linux/susfs.h>
+#include <linux/susfs_fuse.h>
+#endif
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+/* Called with the open directory held; do not recurse into ->lookup(). */
+static bool susfs_dirent_hidden(struct dentry *dir, const char *name,
+				int namlen, u64 ino)
+{
+	struct qstr q = { .name = name, .len = namlen };
+	struct dentry *child;
+	struct inode *inode;
+	bool hidden;
+
+	if (!susfs_is_current_proc_umounted_app() || namlen <= 0 ||
+	    (namlen == 1 && name[0] == '.') ||
+	    (namlen == 2 && name[0] == '.' && name[1] == '.'))
+		return false;
+	child = d_hash_and_lookup(dir, &q);
+	if (!IS_ERR_OR_NULL(child)) {
+		hidden = susfs_is_inode_sus_path(d_backing_inode(child));
+		dput(child);
+		if (hidden)
+			return true;
+	}
+	/* FUSE hashes by nodeid/backing pointer, not the emitted inode number.
+	 * Do not guess that a FUSE ino names a physical inode under /data.
+	 */
+	if (dir->d_sb->s_magic == FUSE_SUPER_MAGIC)
+		return susfs_fuse_is_hidden(dir->d_sb, ino);
+	/* Overlay uses a backing-inode pointer hash, not the emitted d_ino.
+	 * Until it has an identity contract, only the named dentry is reliable.
+	 */
+	if (dir->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC)
+		return false;
+	inode = ilookup(dir->d_sb, ino);
+	if (!inode)
+		return false;
+	hidden = susfs_is_inode_sus_path(inode);
+	iput(inode);
+	return hidden;
+}
+#endif
 int iterate_dir(struct file *file, struct dir_context *ctx)
 {
 	struct inode *inode = file_inode(file);
@@ -118,6 +162,9 @@ struct old_linux_dirent {
 
 struct readdir_callback {
 	struct dir_context ctx;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct dentry *dir;
+#endif
 	struct old_linux_dirent __user * dirent;
 	int result;
 };
@@ -135,6 +182,10 @@ static int fillonedir(struct dir_context *ctx, const char *name, int namlen,
 	buf->result = verify_dirent_name(name, namlen);
 	if (buf->result < 0)
 		return buf->result;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (susfs_dirent_hidden(buf->dir, name, namlen, ino))
+		return 0;
+#endif
 	d_ino = ino;
 	if (sizeof(d_ino) < sizeof(ino) && d_ino != ino) {
 		buf->result = -EOVERFLOW;
@@ -171,6 +222,9 @@ SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
 	if (!f.file)
 		return -EBADF;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	buf.dir = f.file->f_path.dentry;
+#endif
 	error = iterate_dir(f.file, &buf.ctx);
 	if (buf.result)
 		error = buf.result;
@@ -194,6 +248,9 @@ struct linux_dirent {
 
 struct getdents_callback {
 	struct dir_context ctx;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct dentry *dir;
+#endif
 	struct linux_dirent __user * current_dir;
 	struct linux_dirent __user * previous;
 	int count;
@@ -213,6 +270,10 @@ static int filldir(struct dir_context *ctx, const char *name, int namlen,
 	buf->error = verify_dirent_name(name, namlen);
 	if (unlikely(buf->error))
 		return buf->error;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (susfs_dirent_hidden(buf->dir, name, namlen, ino))
+		return 0;
+#endif
 	buf->error = -EINVAL;	/* only used if we fail.. */
 	if (reclen > buf->count)
 		return -EINVAL;
@@ -268,6 +329,9 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
 	if (!f.file)
 		return -EBADF;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	buf.dir = f.file->f_path.dentry;
+#endif
 	error = iterate_dir(f.file, &buf.ctx);
 	if (error >= 0)
 		error = buf.error;
@@ -284,6 +348,9 @@ SYSCALL_DEFINE3(getdents, unsigned int, fd,
 
 struct getdents_callback64 {
 	struct dir_context ctx;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct dentry *dir;
+#endif
 	struct linux_dirent64 __user * current_dir;
 	struct linux_dirent64 __user * previous;
 	int count;
@@ -302,6 +369,10 @@ static int filldir64(struct dir_context *ctx, const char *name, int namlen,
 	buf->error = verify_dirent_name(name, namlen);
 	if (unlikely(buf->error))
 		return buf->error;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (susfs_dirent_hidden(buf->dir, name, namlen, ino))
+		return 0;
+#endif
 	buf->error = -EINVAL;	/* only used if we fail.. */
 	if (reclen > buf->count)
 		return -EINVAL;
@@ -354,6 +425,9 @@ int ksys_getdents64(unsigned int fd, struct linux_dirent64 __user *dirent,
 	if (!f.file)
 		return -EBADF;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	buf.dir = f.file->f_path.dentry;
+#endif
 	error = iterate_dir(f.file, &buf.ctx);
 	if (error >= 0)
 		error = buf.error;
@@ -386,6 +460,9 @@ struct compat_old_linux_dirent {
 
 struct compat_readdir_callback {
 	struct dir_context ctx;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct dentry *dir;
+#endif
 	struct compat_old_linux_dirent __user *dirent;
 	int result;
 };
@@ -404,6 +481,10 @@ static int compat_fillonedir(struct dir_context *ctx, const char *name,
 	buf->result = verify_dirent_name(name, namlen);
 	if (buf->result < 0)
 		return buf->result;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (susfs_dirent_hidden(buf->dir, name, namlen, ino))
+		return 0;
+#endif
 	d_ino = ino;
 	if (sizeof(d_ino) < sizeof(ino) && d_ino != ino) {
 		buf->result = -EOVERFLOW;
@@ -440,6 +521,9 @@ COMPAT_SYSCALL_DEFINE3(old_readdir, unsigned int, fd,
 	if (!f.file)
 		return -EBADF;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	buf.dir = f.file->f_path.dentry;
+#endif
 	error = iterate_dir(f.file, &buf.ctx);
 	if (buf.result)
 		error = buf.result;
@@ -457,6 +541,9 @@ struct compat_linux_dirent {
 
 struct compat_getdents_callback {
 	struct dir_context ctx;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct dentry *dir;
+#endif
 	struct compat_linux_dirent __user *current_dir;
 	struct compat_linux_dirent __user *previous;
 	int count;
@@ -473,6 +560,10 @@ static int compat_filldir(struct dir_context *ctx, const char *name, int namlen,
 	int reclen = ALIGN(offsetof(struct compat_linux_dirent, d_name) +
 		namlen + 2, sizeof(compat_long_t));
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (susfs_dirent_hidden(buf->dir, name, namlen, ino))
+		return 0;
+#endif
 	buf->error = -EINVAL;	/* only used if we fail.. */
 	if (reclen > buf->count)
 		return -EINVAL;
@@ -528,6 +619,9 @@ COMPAT_SYSCALL_DEFINE3(getdents, unsigned int, fd,
 	if (!f.file)
 		return -EBADF;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	buf.dir = f.file->f_path.dentry;
+#endif
 	error = iterate_dir(f.file, &buf.ctx);
 	if (error >= 0)
 		error = buf.error;

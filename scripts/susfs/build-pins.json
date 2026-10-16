@@ -1,0 +1,210 @@
+{
+  "schema": 2,
+  "scope": "Pinned experimental core, individual and all-eight feature compilation; no boot or runtime safety claim",
+  "kernel_base": "c65462bf08da2a8900b98e705bea376de7f7f19c",
+  "protected_ref": "80f0ee4d1ec68838d25c2efeb955d31e90f85dae",
+  "bakasu_commit": "e1682a2831142e68fa30bab97d5690cf90b75119",
+  "bakasu_url": "https://github.com/Baka-SU/BakaSU.git",
+  "susfs_reference": "82f08351fadb8b19dd6591bd14634d02ad832145",
+  "provider_patch": ".github/patches/bakasu-devon-selinux-policy.patch",
+  "provider_sha256": "d75748e5d0a054d7ac49e56b7218f1d44ec4c6ed7ed091088469c40f7e78493c",
+  "provider_files": {
+    "kernel/Kbuild": "306e94c3efd14e11d31288950c12e5b4fbf51a66eab0a44bbe5b4506d83a5b11",
+    "kernel/Kconfig": "ee2ec621e3a6011bae159ca6b86ce9d82a251ecf4861dc64f88599d21e3b10f5",
+    "kernel/feature/selinux_hide.c": "8efd5d9c0e0343fccb807691b385e673affbafe13c5daac9211d38fcf1b96ee8",
+    "kernel/feature/selinux_hide.h": "63bfe72ea86c044367f0f074cc20111fbdfe001d7b2331d712415758a09139ae",
+    "kernel/selinux/rules.c": "1851263d0730958db7e7a0460581d59736977c831389e466b65b98b5e064be54",
+    "kernel/selinux/selinux.h": "43c93d183fd391ada62c3ef3f19e2a37b5d605983eddfb674bd5e2e9295fc81b",
+    "kernel/runtime/ksud_integration.c": "b07603668c5a7bcfc01af0e324334d5e62b3f0ad0fd62f8be15bd9ef83050c63",
+    "kernel/selinux/sepolicy.c": "6020847dbf161b774ce4434603eac2622a65d75fbf4ba07a0e817eb5626b88d3",
+    "kernel/tools/kernel_compat.mk": "0045b59d0689d1cc4e3cef669622ec3443ea4e0d5f9099ac151625e602fc1983",
+    "kernel/core/init.c": "571f169dee48815ba286593344c6ffda700336d599f98b36ed2468faeea6a84f",
+    "kernel/include/ksu.h": "15742116dfa97f739217e934a62de5c616529130dcfeb86e31bb5198d02a9dd6",
+    "kernel/selinux/selinux.c": "5441d6e96b142da42094dc8b0ddb5be4ad66002d9a9d7333931d907933f06566",
+    "kernel/hook/setuid_hook.c": "9f8a327820ef53daebedd3839fe957410222fc2265e33f502dced285872a254c",
+    "kernel/hook/setuid_hook.h": "b61f4e09a2237a3d586e6ae757b77357c0246fe95409a446c1639f69ae850465",
+    "kernel/feature/sucompat.c": "7f14a39e4ff5d24cb65004b294e34af8623283f0ea54e57bb9a83facc629eb43",
+    "kernel/feature/sucompat.h": "38bc2330827d62f31b7d1f9d508b6f8b5684cd9d627957b4e20342e1c0d7083c"
+  },
+  "dependency_directory": ".backport-context/build/bakasu-core-e1682a2831142e68fa30bab97d5690cf90b75119-d75748e5d0a0",
+  "kernel_files": {
+    "drivers/Kconfig": "14958622361af672ccaebff2c1c76b3ad845cae139d1a137831996b530f9aab4",
+    "drivers/Makefile": "60d76afb277db8d6f0e7c6ccc4872bb5833125e9b842518bb354a04ee1f9aab4",
+    "drivers/input/input.c": "eaf3c100be64ee187c0373402a49ed7bdc1087c12f8c96ce4a59c8cdcacc31f5",
+    "fs/Makefile": "cd74ce5bf5a0607785d34225bb22bf64ad9629f4c724158b798d9c6d4c8be01c",
+    "fs/exec.c": "1e53e25d1432acd293e992504fbe19595c4af0873c7f7810e2940b4ad7b43046",
+    "fs/file_table.c": "28d2ed3fb8899e0dcfb9a08a13bd178a6d9563bb5120a3f8148d51c8f5ab085d",
+    "fs/fuse/fuse_i.h": "0380fdd12291c2188670e41f8cd522426824cf38908b8190529519b6e1c44baa",
+    "fs/fuse/inode.c": "1e764fe1730be45e6ee974bbd0622b69c1e20a93219619aff7a66d42951ae500",
+    "fs/namei.c": "90da5246595b7f67a8d8881495d8fda19857bdf688f2cafcbefbbd962cc7d307",
+    "fs/open.c": "62d14984dcb1e9b8d93a2b29e4c92427bb4934019dd78e692e8c17aa729e18fc",
+    "fs/overlayfs/readdir.c": "078e6ad140c06ea4b700f78ebdf184a913a49e847a99e93d06cf5e0ec1e46cac",
+    "fs/read_write.c": "29f311e7e8ca89cc7ba1a9485d46d09652eb8e62fe41ba0c335e0abd3d6dbd61",
+    "fs/readdir.c": "b4b814f5fee33d8a61566c569c147f355cd3e3b383df414570ae2618af838e3b",
+    "fs/stat.c": "e3e0379eaef0710445aa51a253d38e9ea74149289f2fb9c549d3a558642b1e45",
+    "fs/susfs.c": "0557ad913bcf65457120877f597194601c23e5471fe625e518d73af2b69d8909",
+    "fs/susfs_fuse.c": "61282fd352e9e215a5ea5d9833353560fadadaed1d6893290d64489a46e61696",
+    "fs/susfs_path.c": "309a93d31807a9b8bafdfc4f86db155d5200397df98278e374c5d671b0d5701f",
+    "include/linux/ksu_susfs.h": "8fee4cc8c3dc41a8bbfd9c41bc2280ea1cd33df651c1314bb4ffa2e7f0b79e46",
+    "include/linux/namei.h": "ba2354903be6758881317cf21a4269af23413e3447e0f6956f46468e8c4c8881",
+    "include/linux/susfs.h": "0b516fe5fa296e97a7c25e5a5f1079dd4840743f63a78e32230905e0505838c1",
+    "include/linux/susfs_def.h": "1dafb15b59608821b75ef4984dba0c4d98ba8993eec589398402c2d301d2d39c",
+    "include/linux/susfs_fuse.h": "2394f18ce7ed37a2b10c9da1b3eb5d0705a40037a0c812a4c621df57694e2e9a",
+    "kernel/fork.c": "6b8df5e76b86d63e5f12ce09733f140ffe9c5364aa2020942b427ff58e25ef0c",
+    "kernel/reboot.c": "d2206ba159b82fc3aaaafc2c6ba63df067cc9910f16d0c2df9d9c01a843c5987",
+    "kernel/sys.c": "9b01cec109fb3c30d285b1508e4d5ec66524899efedf89b199847f9595f79e60",
+    "arch/arm64/configs/vendor/bengal-perf_defconfig": "4509a888bef6aa299f16786b1e9b81a9397b677b2f13a3686e7bc100c1cc5363",
+    "arch/arm64/configs/vendor/ext_config/moto-bengal.config": "f07fb14e30cc6b3580c106ae28126945134725df45aa196ffa3b246ad05585b7",
+    "arch/arm64/configs/vendor/ext_config/devon-default.config": "74f8d513dfdbb218cc92d829e986fc7343f663768c461565c9b50d51cf837fb3",
+    "arch/arm64/configs/vendor/ext_config/devon-susfs-core-test.config": "dd882e852dfb569e7d7bf016bf0e911c5f6bc7179d56e27644318c897291ed54",
+    "fs/fhandle.c": "f7e20ec317efbd0ce22cd2a17c3255132ff13822c2d2a33735a7e4f9e1d40178",
+    "fs/mount.h": "a23a9bccff4c598fd1277c08388e3221b6226dd73d415e08627329b0d8df0164",
+    "fs/namespace.c": "fcafc71b38381decf9c373ed6902a8f843b1387931cc879827a5e3b6fc3a0996",
+    "fs/notify/fdinfo.c": "7f78b417a54b161b01043f3aec928f0f66b21406f896ec9c6eb35100b0b53d4c",
+    "fs/proc/base.c": "f62af14858d0be70f1ada8b3ac57a40c0d44a80017560e0af888d46814902dba",
+    "fs/proc/cmdline.c": "9737fa2782ce58ed22dc12234133f9a27caaf047b5049e2b3a12251f5db2bef1",
+    "fs/proc/fd.c": "aab88ce22d4bc2ca12aa1b97be8097544a8a282fe9809e8a6e0e04779195a35d",
+    "fs/proc/task_mmu.c": "7284b023ebd390ad9a1816ba03300be33a3382b9c391dd93ec6db92540b76bcb",
+    "fs/proc_namespace.c": "0a8d6ed613d812c2d28635042c1e5a4a825921ba4efd2f89c99ab11499de6b78",
+    "fs/statfs.c": "f15a8351f49fd6ed70c223e0d54ec496622a05245a1b65d3184e5201f573f25f",
+    "fs/super.c": "3c23f20146b060d56920517d751c900200cc6928477b9057301351bf2ae09972",
+    "fs/susfs_cmdline.c": "ea445108fe7b8b0f0a9097ee14f3aba27fc61a89a2459e04863a466f9dfe2dd8",
+    "fs/susfs_kstat.c": "33aad686dc841b271247955c20c04e3bf5e945c127a4bc7c6521ef9a56e29c1a",
+    "fs/susfs_map.c": "d444bad98ac43ae4a2640eef2e7f4fd14398932d37b407095f074ef316973988",
+    "fs/susfs_mount.c": "172cfe21484f6e0c976574e721e8401336afc0f483f646fe2b49f10d101bf90d",
+    "fs/susfs_redirect.c": "bf6e7f117e2ba6ece280969fbae010cff32fda016be7814b9a327cd44d31ac3f",
+    "fs/susfs_uname.c": "5e6a9bcecc435f4ccbc8c328feabe5ddaab2d0d232a62e8baf8f8e8e1ee70a7f",
+    "include/linux/stat.h": "0153a63d0193bdbe0992672dd4c59914582e5ca1606f59e21d13274e73af993c",
+    "include/linux/susfs_map.h": "7f486cf551ec8325d339c9e61e5a11321804823ac8e1dc16b8f9a3cd38e7a055",
+    "include/linux/susfs_meta.h": "b864853cdc6826b7bebd1b77a60e926c89a63ed5e8f9ffdb19aef3447cbdc544",
+    "include/linux/susfs_mount.h": "a6b327ebad3fd860a8ce250a12d84593b1ebc2aaab84b63e6b0d163622115e25",
+    "include/linux/susfs_redirect.h": "fa4c9d38e0ff396cfaf7a3d3e3c0254e119d2d1fd7c1f22d1abb047590873b59",
+    "include/linux/susfs_spoof.h": "81a26ec688246f68f4097ca9b78602288ac2be799b9ea46f3eb82171bd277b4e",
+    "include/uapi/linux/stat.h": "30eff87c031daa62b3075ffedf1ab27da25cc1a1564e96ab12bc901ff0a7926b",
+    "kernel/kallsyms.c": "812c97fca4b4caaaf367a1bcb20386c239fe61b4a2c89e30d6a81f6f981c6dfe",
+    "mm/memory.c": "5d9b0687047fad5b77c4f48b2d49eb23efc0b98b2a5c09c13fc624515a4085b7"
+  },
+  "fragments": [
+    "arch/arm64/configs/vendor/ext_config/moto-bengal.config",
+    "arch/arm64/configs/vendor/ext_config/devon-default.config",
+    "arch/arm64/configs/vendor/ext_config/devon-susfs-core-test.config"
+  ],
+  "config": {
+    "ARM64": "y",
+    "64BIT": "y",
+    "THREAD_INFO_IN_TASK": "y",
+    "KSU": "y",
+    "KSU_SUSFS": "y",
+    "KSU_DEVON_SELINUX_POLICY": "y",
+    "KSU_SUSFS_ENABLE_LOG": "y",
+    "KALLSYMS_ALL": "y",
+    "FSNOTIFY": "y",
+    "SRCU": "y",
+    "SECURITY_SELINUX": "y",
+    "LTO_CLANG": "y",
+    "CFI_CLANG": "y",
+    "DEVON_DTB": "y",
+    "MODULES": "y",
+    "KSU_TRACEPOINT_HOOK": "n",
+    "KSU_MANUAL_HOOK": "n",
+    "KSU_MANUAL_HOOK_AUTO_SETUID_HOOK": "n",
+    "KSU_MANUAL_HOOK_AUTO_INITRC_HOOK": "n",
+    "KSU_MANUAL_HOOK_AUTO_INPUT_HOOK": "n",
+    "KSU_DEBUG": "n",
+    "KSU_TOOLKIT_SUPPORT": "n",
+    "KSU_DISABLE_MANAGER": "n",
+    "KSU_DISABLE_POLICY": "n",
+    "KSU_SUSFS_SUS_PATH": "n",
+    "KSU_SUSFS_SUS_MOUNT": "n",
+    "KSU_SUSFS_SUS_KSTAT": "n",
+    "KSU_SUSFS_SPOOF_UNAME": "n",
+    "KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS": "n",
+    "KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG": "n",
+    "KSU_SUSFS_OPEN_REDIRECT": "n",
+    "KSU_SUSFS_SUS_MAP": "n"
+  },
+  "toolchain": {
+    "url": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-16.0.0_r4/clang-r547379.tar.gz",
+    "commit": "9916fb51ccb914d62d35ad9a7b9b21d2ef046928",
+    "revision": "r547379",
+    "archive_sha256": "6350d387cbe6d75c1df1018da2a29c6bf1b233bd58e122e44f3ef5b16a90facc",
+    "files": {
+      "bin/clang": "55d80d777d85327543868817fb836231691eae2e13030ab31a01a769a820bf2f",
+      "bin/ld.lld": "55bfa2be5af6af9a3d9a17e310c501c0aca10f5431649988ed0a9a233c911652",
+      "bin/llvm-ar": "966d8ed2cab3fd3057398af43b3a07b91f1fd3482dc3713458808e6dd86396d6",
+      "bin/llvm-nm": "2f0682c4cbb29727b7039aad0b7fcbbf5a52de0bb7d0a3a6863ad1568383023a",
+      "bin/llvm-objcopy": "d2a3191ad2228bb60c35e18466615cb53ed7263c2e73134624349f0367cb1f88",
+      "bin/llvm-strip": "d2a3191ad2228bb60c35e18466615cb53ed7263c2e73134624349f0367cb1f88",
+      "bin/llvm-objdump": "3af14767b7a8fe24d82052d1c76b193b74205f8321ef7188ef9fd8866822491d"
+    }
+  },
+  "actions": {
+    "checkout": "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02"
+  },
+  "profiles": {
+    "core": [],
+    "identity": [
+      "SPOOF_UNAME",
+      "SPOOF_CMDLINE_OR_BOOTCONFIG"
+    ],
+    "redirect-symbols": [
+      "SPOOF_UNAME",
+      "SPOOF_CMDLINE_OR_BOOTCONFIG",
+      "HIDE_KSU_SUSFS_SYMBOLS",
+      "OPEN_REDIRECT"
+    ],
+    "metadata-map": [
+      "SPOOF_UNAME",
+      "SPOOF_CMDLINE_OR_BOOTCONFIG",
+      "HIDE_KSU_SUSFS_SYMBOLS",
+      "OPEN_REDIRECT",
+      "SUS_KSTAT",
+      "SUS_MAP"
+    ],
+    "path-no-mount": [
+      "SPOOF_UNAME",
+      "SPOOF_CMDLINE_OR_BOOTCONFIG",
+      "HIDE_KSU_SUSFS_SYMBOLS",
+      "OPEN_REDIRECT",
+      "SUS_KSTAT",
+      "SUS_MAP",
+      "SUS_PATH"
+    ],
+    "all": [
+      "SUS_PATH",
+      "SUS_MOUNT",
+      "SUS_KSTAT",
+      "SPOOF_UNAME",
+      "HIDE_KSU_SUSFS_SYMBOLS",
+      "SPOOF_CMDLINE_OR_BOOTCONFIG",
+      "OPEN_REDIRECT",
+      "SUS_MAP"
+    ],
+    "sus-path": [
+      "SUS_PATH"
+    ],
+    "sus-mount": [
+      "SUS_MOUNT"
+    ],
+    "sus-kstat": [
+      "SUS_KSTAT"
+    ],
+    "spoof-uname": [
+      "SPOOF_UNAME"
+    ],
+    "hide-ksu-susfs-symbols": [
+      "HIDE_KSU_SUSFS_SYMBOLS"
+    ],
+    "spoof-cmdline-or-bootconfig": [
+      "SPOOF_CMDLINE_OR_BOOTCONFIG"
+    ],
+    "open-redirect": [
+      "OPEN_REDIRECT"
+    ],
+    "sus-map": [
+      "SUS_MAP"
+    ]
+  },
+  "legacy_kernel_base": "18bd9752ada79090ce11326662eaaa9f33717728"
+}

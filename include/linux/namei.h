@@ -87,6 +87,9 @@ extern int vfs_path_lookup(struct dentry *, struct vfsmount *,
 
 extern struct dentry *try_lookup_one_len(const char *, struct dentry *, int);
 extern struct dentry *lookup_one_len(const char *, struct dentry *, int);
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+extern struct dentry *susfs_lookup_one_len_metadata(const char *, struct dentry *, int);
+#endif
 extern struct dentry *lookup_one_len2(const char *, struct vfsmount *mnt, struct dentry *, int);
 extern struct dentry *lookup_one_len_unlocked(const char *, struct dentry *, int);
 extern struct dentry *lookup_positive_unlocked(const char *, struct dentry *, int);

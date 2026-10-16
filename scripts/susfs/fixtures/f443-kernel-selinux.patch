@@ -1,0 +1,200 @@
+diff --git a/include/linux/susfs_selinux.h b/include/linux/susfs_selinux.h
+new file mode 100644
+index 000000000000..a54f505fa832
+--- /dev/null
++++ b/include/linux/susfs_selinux.h
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_SUSFS_SELINUX_H
++#define _LINUX_SUSFS_SELINUX_H
++
++#include <linux/types.h>
++
++/* Interface revision; this is not a SUSFS feature or version claim. */
++#define SUSFS_SELINUX_ADAPTER_ABI 1
++
++struct av_decision;
++struct page;
++
++#ifdef CONFIG_KSU_SUSFS
++#ifndef CONFIG_KSU
++#error "The devon SELinux adapter requires built-in KernelSU"
++#endif
++/*
++ * These operations may sleep. The caller performs the live-policy permission
++ * checks before calling. False means use the ordinary SELinux operation; true
++ * means handled, including errors in *error. An active adapter never falls back
++ * after a policy error. No policydb, sidtab or saved-policy SID escapes here.
++ */
++bool ksu_susfs_set_current_sid(const char *context, u32 len, u32 *sid,
++			      int *error);
++/* On success, *canon is allocated with kmalloc and the caller must kfree it. */
++bool ksu_susfs_context_to_string(const char *context, u32 len, char **canon,
++			       u32 *canon_len, int *error);
++bool ksu_susfs_compute_av(const char *source, const char *target, u16 tclass,
++			 struct av_decision *avd, int *error);
++/* Returns one owned page reference, or NULL to use the real status page. */
++struct page *ksu_susfs_get_status_page(void);
++#endif
++
++#endif /* _LINUX_SUSFS_SELINUX_H */
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 7ead72a8618a..42a32b14880a 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -103,6 +103,8 @@
+ #include "audit.h"
+ #include "avc_ss.h"
+ 
++#include <linux/susfs_selinux.h>
++
+ struct selinux_state selinux_state;
+ 
+ /* SECMARK reference count */
+@@ -6350,8 +6352,12 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
+ 			str[size-1] = 0;
+ 			size--;
+ 		}
+-		error = security_context_to_sid(&selinux_state, value, size,
+-						&sid, GFP_KERNEL);
++#ifdef CONFIG_KSU_SUSFS
++		if (strcmp(name, "current") ||
++		    !ksu_susfs_set_current_sid(value, size, &sid, &error))
++#endif
++			error = security_context_to_sid(&selinux_state, value, size,
++						    &sid, GFP_KERNEL);
+ 		if (error == -EINVAL && !strcmp(name, "fscreate")) {
+ 			if (!has_cap_mac_admin(true)) {
+ 				struct audit_buffer *ab;
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+index d93fd1a98163..a0b37e541c11 100644
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -21,6 +21,7 @@
+ #include <linux/fs.h>
+ #include <linux/fs_context.h>
+ #include <linux/mount.h>
++#include <linux/susfs_selinux.h>
+ #include <linux/mutex.h>
+ #include <linux/init.h>
+ #include <linux/string.h>
+@@ -226,11 +227,31 @@ static int sel_open_handle_status(struct inode *inode, struct file *filp)
+ 	if (!status)
+ 		return -ENOMEM;
+ 
++#ifdef CONFIG_KSU_SUSFS
++	{
++		struct page *saved_status = ksu_susfs_get_status_page();
++
++		if (saved_status)
++			status = saved_status;
++		else
++			get_page(status);
++	}
++#endif
+ 	filp->private_data = status;
+ 
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_KSU_SUSFS
++static int sel_release_handle_status(struct inode *inode, struct file *filp)
++{
++	/* VMAs retain the file, including its page reference, until unmap. */
++	put_page(filp->private_data);
++	filp->private_data = NULL;
++	return 0;
++}
++#endif
++
+ static ssize_t sel_read_handle_status(struct file *filp, char __user *buf,
+ 				      size_t count, loff_t *ppos)
+ {
+@@ -267,6 +288,9 @@ static int sel_mmap_handle_status(struct file *filp,
+ 
+ static const struct file_operations sel_handle_status_ops = {
+ 	.open		= sel_open_handle_status,
++#ifdef CONFIG_KSU_SUSFS
++	.release	= sel_release_handle_status,
++#endif
+ 	.read		= sel_read_handle_status,
+ 	.mmap		= sel_mmap_handle_status,
+ 	.llseek		= generic_file_llseek,
+@@ -607,6 +631,9 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+ 	char *canon = NULL;
+ 	u32 sid, len;
+ 	ssize_t length;
++#ifdef CONFIG_KSU_SUSFS
++	int adapter_error;
++#endif
+ 
+ 	length = avc_has_perm(&selinux_state,
+ 			      current_sid(), SECINITSID_SECURITY,
+@@ -614,11 +641,20 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+ 	if (length)
+ 		goto out;
+ 
+-	length = security_context_to_sid(state, buf, size, &sid, GFP_KERNEL);
+-	if (length)
+-		goto out;
++#ifdef CONFIG_KSU_SUSFS
++	if (ksu_susfs_context_to_string(buf, size, &canon, &len,
++				      &adapter_error)) {
++		length = adapter_error;
++	} else {
++#endif
++		length = security_context_to_sid(state, buf, size, &sid, GFP_KERNEL);
++		if (length)
++			goto out;
+ 
+-	length = security_sid_to_context(state, sid, &canon, &len);
++		length = security_sid_to_context(state, sid, &canon, &len);
++#ifdef CONFIG_KSU_SUSFS
++	}
++#endif
+ 	if (length)
+ 		goto out;
+ 
+@@ -829,6 +865,9 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+ 	u16 tclass;
+ 	struct av_decision avd;
+ 	ssize_t length;
++#ifdef CONFIG_KSU_SUSFS
++	int adapter_error;
++#endif
+ 
+ 	length = avc_has_perm(&selinux_state,
+ 			      current_sid(), SECINITSID_SECURITY,
+@@ -850,15 +889,25 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+ 	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
+ 		goto out;
+ 
+-	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
+-	if (length)
+-		goto out;
++#ifdef CONFIG_KSU_SUSFS
++	if (ksu_susfs_compute_av(scon, tcon, tclass, &avd, &adapter_error)) {
++		length = adapter_error;
++		if (length)
++			goto out;
++	} else {
++#endif
++		length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
++		if (length)
++			goto out;
+ 
+-	length = security_context_str_to_sid(state, tcon, &tsid, GFP_KERNEL);
+-	if (length)
+-		goto out;
++		length = security_context_str_to_sid(state, tcon, &tsid, GFP_KERNEL);
++		if (length)
++			goto out;
+ 
+-	security_compute_av_user(state, ssid, tsid, tclass, &avd);
++		security_compute_av_user(state, ssid, tsid, tclass, &avd);
++#ifdef CONFIG_KSU_SUSFS
++	}
++#endif
+ 
+ 	length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT,
+ 			  "%x %x %x %x %u %x",

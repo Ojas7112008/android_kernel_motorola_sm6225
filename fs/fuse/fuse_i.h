@@ -8,6 +8,9 @@
 
 #ifndef _FS_FUSE_I_H
 #define _FS_FUSE_I_H
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+#include <linux/susfs_fuse.h>
+#endif
 
 #ifndef pr_fmt
 # define pr_fmt(fmt) "fuse: " fmt
@@ -218,6 +221,9 @@ struct fuse_inode {
 	 * Dax specific inode data
 	 */
 	struct fuse_inode_dax *dax;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	struct susfs_fuse_inode susfs_path;
 #endif
 };
 

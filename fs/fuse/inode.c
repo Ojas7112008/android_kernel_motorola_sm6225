@@ -75,6 +75,9 @@ static struct inode *fuse_alloc_inode(struct super_block *sb)
 	if (!fi)
 		return NULL;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	susfs_fuse_inode_init(&fi->susfs_path, &fi->inode);
+#endif
 	fi->i_time = 0;
 	fi->inval_mask = 0;
 #ifdef CONFIG_FUSE_BPF
@@ -109,6 +112,9 @@ static void fuse_free_inode(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	susfs_fuse_inode_forget(&fi->susfs_path);
+#endif
 	mutex_destroy(&fi->mutex);
 	kfree(fi->forget);
 #ifdef CONFIG_FUSE_DAX
@@ -125,6 +131,9 @@ static void fuse_evict_inode(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
 
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	susfs_fuse_inode_forget(&fi->susfs_path);
+#endif
 	/* Will write inode on close/munmap and in all other dirtiers */
 	WARN_ON(inode->i_state & I_DIRTY_INODE);
 
@@ -250,6 +259,9 @@ void fuse_change_attributes_common(struct inode *inode, struct fuse_attr *attr,
 		inode->i_mode &= ~S_ISVTX;
 
 	fi->orig_ino = attr->ino;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	susfs_fuse_inode_update(&fi->susfs_path, fi->orig_ino);
+#endif
 }
 
 void fuse_change_attributes(struct inode *inode, struct fuse_attr *attr,

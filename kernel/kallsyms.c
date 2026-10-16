@@ -24,6 +24,9 @@
 #include <linux/filter.h>
 #include <linux/ftrace.h>
 #include <linux/compiler.h>
+#ifdef CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+#include <linux/susfs_spoof.h>
+#endif
 
 /*
  * These will be re-linked against their real values
@@ -643,6 +646,11 @@ static int s_show(struct seq_file *m, void *p)
 	/* Some debugging symbols have no name.  Ignore them. */
 	if (!iter->name[0])
 		return 0;
+
+#ifdef CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+	if (!iter->module_name[0] && susfs_hide_symbol(iter->name))
+		return 0;
+#endif
 
 	value = iter->show_value ? (void *)iter->value : NULL;
 

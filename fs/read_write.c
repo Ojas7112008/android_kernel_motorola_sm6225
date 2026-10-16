@@ -11,6 +11,9 @@
 #include <linux/fcntl.h>
 #include <linux/file.h>
 #include <linux/uio.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/ksu_susfs.h>
+#endif
 #include <linux/fsnotify.h>
 #include <linux/security.h>
 #include <linux/export.h>
@@ -294,8 +297,20 @@ loff_t vfs_llseek(struct file *file, loff_t offset, int whence)
 
 	fn = no_llseek;
 	if (file->f_mode & FMODE_LSEEK) {
-		if (file->f_op->llseek)
+		if (file->f_op->llseek) {
+#ifdef CONFIG_KSU_SUSFS
+			loff_t result;
+			int handled;
+
+			handled = ksu_handle_initrc_seek_file(file, offset,
+							    whence, &result);
+			if (handled < 0)
+				return handled;
+			if (handled)
+				return result;
+#endif
 			fn = file->f_op->llseek;
+		}
 	}
 	return fn(file, offset, whence);
 }
@@ -437,6 +452,10 @@ EXPORT_SYMBOL(kernel_read);
 ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
+#ifdef CONFIG_KSU_SUSFS
+	loff_t before;
+	int handled;
+#endif
 
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
@@ -449,7 +468,19 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 	if (!ret) {
 		if (count > MAX_RW_COUNT)
 			count =  MAX_RW_COUNT;
+#ifdef CONFIG_KSU_SUSFS
+		before = *pos;
+		handled = ksu_handle_sys_read_file(file, buf, &count, pos, &ret);
+		if (handled < 0)
+			ret = handled;
+		else if (!handled) {
+			ret = __vfs_read(file, buf, count, pos);
+			if (count)
+				ret = ksu_handle_initrc_read_result(file, before, ret);
+		}
+#else
 		ret = __vfs_read(file, buf, count, pos);
+#endif
 		if (ret > 0) {
 			fsnotify_access(file);
 			add_rchar(current, ret);
@@ -908,6 +939,11 @@ static ssize_t do_iter_read(struct file *file, struct iov_iter *iter,
 {
 	size_t tot_len;
 	ssize_t ret = 0;
+#ifdef CONFIG_KSU_SUSFS
+	loff_t before;
+	size_t limit;
+	int handled;
+#endif
 
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
@@ -921,10 +957,26 @@ static ssize_t do_iter_read(struct file *file, struct iov_iter *iter,
 	if (ret < 0)
 		return ret;
 
+#ifdef CONFIG_KSU_SUSFS
+	before = *pos;
+	limit = tot_len;
+	handled = ksu_handle_initrc_iter_file(file, iter, pos, &limit, !flags, &ret);
+	if (handled < 0) {
+		ret = handled;
+		goto out;
+	}
+	if (handled)
+		goto out;
+	iov_iter_truncate(iter, limit);
+#endif
 	if (file->f_op->read_iter)
 		ret = do_iter_readv_writev(file, iter, pos, READ, flags);
 	else
 		ret = do_loop_readv_writev(file, iter, pos, READ, flags);
+#ifdef CONFIG_KSU_SUSFS
+	iov_iter_reexpand(iter, tot_len - limit + iov_iter_count(iter));
+	ret = ksu_handle_initrc_read_result(file, before, ret);
+#endif
 out:
 	if (ret >= 0)
 		fsnotify_access(file);
@@ -936,6 +988,11 @@ ssize_t vfs_iocb_iter_read(struct file *file, struct kiocb *iocb,
 {
 	size_t tot_len;
 	ssize_t ret = 0;
+#ifdef CONFIG_KSU_SUSFS
+	loff_t before;
+	size_t limit;
+	int handled;
+#endif
 
 	if (!file->f_op->read_iter)
 		return -EINVAL;
@@ -951,7 +1008,24 @@ ssize_t vfs_iocb_iter_read(struct file *file, struct kiocb *iocb,
 	if (ret < 0)
 		return ret;
 
+#ifdef CONFIG_KSU_SUSFS
+	before = iocb->ki_pos;
+	limit = tot_len;
+	handled = ksu_handle_initrc_iter_file(file, iter, &iocb->ki_pos, &limit,
+					    is_sync_kiocb(iocb), &ret);
+	if (handled < 0) {
+		ret = handled;
+		goto out;
+	}
+	if (handled)
+		goto out;
+	iov_iter_truncate(iter, limit);
+#endif
 	ret = call_read_iter(file, iocb, iter);
+#ifdef CONFIG_KSU_SUSFS
+	iov_iter_reexpand(iter, tot_len - limit + iov_iter_count(iter));
+	ret = ksu_handle_initrc_read_result(file, before, ret);
+#endif
 out:
 	if (ret >= 0)
 		fsnotify_access(file);

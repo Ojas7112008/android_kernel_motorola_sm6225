@@ -17,6 +17,16 @@
 #include <linux/syscalls.h>
 #include <linux/pagemap.h>
 #include <linux/compat.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#include <linux/susfs_mount.h>
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+#include <linux/susfs_meta.h>
+#endif
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/ksu_susfs.h>
+#include "internal.h"
+#endif
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
@@ -54,11 +64,12 @@ void generic_fillattr(struct inode *inode, struct kstat *stat)
 EXPORT_SYMBOL(generic_fillattr);
 
 /**
- * vfs_getattr_nosec - getattr without security checks
+ * vfs_getattr_nosec_mnt_id - getattr without security checks
  * @path: file to get attributes from
  * @stat: structure to return attributes in
  * @request_mask: STATX_xxx flags indicating what the caller wants
  * @query_flags: Query mode (KSTAT_QUERY_FLAGS)
+ * @mnt_id: Optional private statx mount-ID result; never part of struct kstat
  *
  * Get attributes without calling security_inode_getattr.
  *
@@ -66,8 +77,9 @@ EXPORT_SYMBOL(generic_fillattr);
  * filehandle lookup code, which uses only the inode number and returns no
  * attributes to any user.  Any other code probably wants vfs_getattr.
  */
-int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
-		      u32 request_mask, unsigned int query_flags)
+static int vfs_getattr_nosec_mnt_id(const struct path *path, struct kstat *stat,
+				    u32 request_mask, unsigned int query_flags,
+				    u64 *mnt_id)
 {
 	struct inode *inode = d_backing_inode(path->dentry);
 
@@ -75,21 +87,49 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 	stat->result_mask |= STATX_BASIC_STATS;
 	request_mask &= STATX_ALL;
 	query_flags &= KSTAT_QUERY_FLAGS;
+#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MOUNT)
+	if (inode->i_op->getattr) {
+		int err = inode->i_op->getattr(path, stat, request_mask,
+					     query_flags);
+
+		if (err)
+			return err;
+	} else {
+		generic_fillattr(inode, stat);
+	}
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	if (mnt_id)
+		*mnt_id = susfs_mnt_hide_current() ?
+			susfs_mnt_nonhidden_id(path->mnt) : susfs_mnt_id(path->mnt);
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	susfs_spoof_kstat(inode, stat, mnt_id);
+#endif
+#else
 	if (inode->i_op->getattr)
 		return inode->i_op->getattr(path, stat, request_mask,
 					    query_flags);
 
 	generic_fillattr(inode, stat);
+#endif
 	return 0;
+}
+
+/* Keep the native module-facing kstat layout and VFS signatures unchanged. */
+int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
+		      u32 request_mask, unsigned int query_flags)
+{
+	return vfs_getattr_nosec_mnt_id(path, stat, request_mask, query_flags, NULL);
 }
 EXPORT_SYMBOL(vfs_getattr_nosec);
 
 /*
- * vfs_getattr - Get the enhanced basic attributes of a file
+ * vfs_getattr_mnt_id - Get the enhanced basic attributes of a file
  * @path: The file of interest
  * @stat: Where to return the statistics
  * @request_mask: STATX_xxx flags indicating what the caller wants
  * @query_flags: Query mode (KSTAT_QUERY_FLAGS)
+ * @mnt_id: Optional private statx mount-ID result
  *
  * Ask the filesystem for a file's attributes.  The caller must indicate in
  * request_mask and query_flags to indicate what they want.
@@ -105,15 +145,22 @@ EXPORT_SYMBOL(vfs_getattr_nosec);
  *
  * 0 will be returned on success, and a -ve error code if unsuccessful.
  */
-int vfs_getattr(const struct path *path, struct kstat *stat,
-		u32 request_mask, unsigned int query_flags)
+static int vfs_getattr_mnt_id(const struct path *path, struct kstat *stat,
+			      u32 request_mask, unsigned int query_flags,
+			      u64 *mnt_id)
 {
 	int retval;
 
 	retval = security_inode_getattr(path);
 	if (retval)
 		return retval;
-	return vfs_getattr_nosec(path, stat, request_mask, query_flags);
+	return vfs_getattr_nosec_mnt_id(path, stat, request_mask, query_flags, mnt_id);
+}
+
+int vfs_getattr(const struct path *path, struct kstat *stat,
+		u32 request_mask, unsigned int query_flags)
+{
+	return vfs_getattr_mnt_id(path, stat, request_mask, query_flags, NULL);
 }
 EXPORT_SYMBOL(vfs_getattr);
 
@@ -142,6 +189,10 @@ int vfs_statx_fd(unsigned int fd, struct kstat *stat,
 	if (f.file) {
 		error = vfs_getattr(&f.file->f_path, stat,
 				    request_mask, query_flags);
+#ifdef CONFIG_KSU_SUSFS
+		if (!error && (stat->result_mask & STATX_SIZE))
+			error = ksu_handle_vfs_fstat_file(f.file, &stat->size);
+#endif
 		fdput(f);
 	}
 	return error;
@@ -149,12 +200,13 @@ int vfs_statx_fd(unsigned int fd, struct kstat *stat,
 EXPORT_SYMBOL(vfs_statx_fd);
 
 /**
- * vfs_statx - Get basic and extra attributes by filename
+ * vfs_statx_mnt_id - Get basic and extra attributes by filename
  * @dfd: A file descriptor representing the base dir for a relative filename
  * @filename: The name of the file of interest
  * @flags: Flags to control the query
  * @stat: The result structure to fill in.
  * @request_mask: STATX_xxx flags indicating what the caller wants
+ * @mnt_id: Optional private statx result, filled while the path is referenced
  *
  * This function is a wrapper around vfs_getattr().  The main difference is
  * that it uses a filename and base directory to determine the file location.
@@ -163,12 +215,15 @@ EXPORT_SYMBOL(vfs_statx_fd);
  *
  * 0 will be returned on success, and a -ve error code if unsuccessful.
  */
-int vfs_statx(int dfd, const char __user *filename, int flags,
-	      struct kstat *stat, u32 request_mask)
+static int vfs_statx_mnt_id(int dfd, const char __user *filename, int flags,
+			    struct kstat *stat, u32 request_mask, u64 *mnt_id)
 {
 	struct path path;
 	int error = -EINVAL;
 	unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
+#ifdef CONFIG_KSU_SUSFS
+	struct filename *fname;
+#endif
 
 	if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
 		       AT_EMPTY_PATH | KSTAT_QUERY_FLAGS)) != 0)
@@ -182,11 +237,26 @@ int vfs_statx(int dfd, const char __user *filename, int flags,
 		lookup_flags |= LOOKUP_EMPTY;
 
 retry:
+#ifdef CONFIG_KSU_SUSFS
+	fname = getname_flags(filename, lookup_flags, NULL);
+	if (IS_ERR(fname)) {
+		error = PTR_ERR(fname);
+		goto out;
+	}
+	error = ksu_handle_stat(&dfd, &fname, &flags);
+	if (error) {
+		putname(fname);
+		goto out;
+	}
+	/* filename_lookup() consumes fname, including its failure paths. */
+	error = filename_lookup(dfd, fname, lookup_flags, &path, NULL);
+#else
 	error = user_path_at(dfd, filename, lookup_flags, &path);
+#endif
 	if (error)
 		goto out;
 
-	error = vfs_getattr(&path, stat, request_mask, flags);
+	error = vfs_getattr_mnt_id(&path, stat, request_mask, flags, mnt_id);
 	path_put(&path);
 	if (retry_estale(error, lookup_flags)) {
 		lookup_flags |= LOOKUP_REVAL;
@@ -194,6 +264,12 @@ retry:
 	}
 out:
 	return error;
+}
+
+int vfs_statx(int dfd, const char __user *filename, int flags,
+	      struct kstat *stat, u32 request_mask)
+{
+	return vfs_statx_mnt_id(dfd, filename, flags, stat, request_mask, NULL);
 }
 EXPORT_SYMBOL(vfs_statx);
 
@@ -353,6 +429,22 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
 	return cp_new_stat(&stat, statbuf);
 }
 
+
+#ifdef CONFIG_KSU_MANUAL_HOOK
+__attribute__((hot))
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
+                           int *flags);
+
+extern void ksu_handle_newfstat_ret(unsigned int *fd,
+                                    struct stat __user **statbuf_ptr);
+
+#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+extern void ksu_handle_fstat64_ret(unsigned long *fd,
+                                   struct stat64 __user **statbuf_ptr);
+#endif
+#endif
+
+
 #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
 SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
 		struct stat __user *, statbuf, int, flag)
@@ -360,6 +452,10 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
 	struct kstat stat;
 	int error;
 
+	#ifdef CONFIG_KSU_MANUAL_HOOK
+    ksu_handle_stat(&dfd, &filename, &flag);
+	#endif
+	
 	error = vfs_fstatat(dfd, filename, &stat, flag);
 	if (error)
 		return error;
@@ -375,6 +471,10 @@ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
 	if (!error)
 		error = cp_new_stat(&stat, statbuf);
 
+	#ifdef CONFIG_KSU_MANUAL_HOOK
+    ksu_handle_newfstat_ret(&fd, &statbuf);
+	#endif
+	
 	return error;
 }
 
@@ -518,7 +618,7 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
 #endif /* __ARCH_WANT_STAT64 || __ARCH_WANT_COMPAT_STAT64 */
 
 static noinline_for_stack int
-cp_statx(const struct kstat *stat, struct statx __user *buffer)
+cp_statx(const struct kstat *stat, struct statx __user *buffer, u64 mnt_id)
 {
 	struct statx tmp;
 
@@ -547,6 +647,10 @@ cp_statx(const struct kstat *stat, struct statx __user *buffer)
 	tmp.stx_rdev_minor = MINOR(stat->rdev);
 	tmp.stx_dev_major = MAJOR(stat->dev);
 	tmp.stx_dev_minor = MINOR(stat->dev);
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	tmp.stx_mnt_id = mnt_id;
+	tmp.stx_mask |= STATX_MNT_ID;
+#endif
 
 	return copy_to_user(buffer, &tmp, sizeof(tmp)) ? -EFAULT : 0;
 }
@@ -568,6 +672,7 @@ SYSCALL_DEFINE5(statx,
 		struct statx __user *, buffer)
 {
 	struct kstat stat;
+	u64 mnt_id = 0;
 	int error;
 
 	if (mask & STATX__RESERVED)
@@ -575,11 +680,11 @@ SYSCALL_DEFINE5(statx,
 	if ((flags & AT_STATX_SYNC_TYPE) == AT_STATX_SYNC_TYPE)
 		return -EINVAL;
 
-	error = vfs_statx(dfd, filename, flags, &stat, mask);
+	error = vfs_statx_mnt_id(dfd, filename, flags, &stat, mask, &mnt_id);
 	if (error)
 		return error;
 
-	return cp_statx(&stat, buffer);
+	return cp_statx(&stat, buffer, mnt_id);
 }
 
 #ifdef CONFIG_COMPAT

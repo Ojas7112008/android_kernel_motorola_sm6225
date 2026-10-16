@@ -1,0 +1,2035 @@
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index b7655cb..e5de36f 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -146,6 +146,19 @@ ifeq ($(CONFIG_KSU),y)
+   endif
+ endif
+ 
++ifdef CONFIG_KSU_DEVON_SELINUX_POLICY
++  ifneq ($(VERSION).$(PATCHLEVEL),4.19)
++    $(error Devon SELinux policy support requires Linux 4.19.)
++  endif
++  ifeq ($(filter y Y,$(CONFIG_KSU)),)
++    $(error Devon SELinux policy support requires built-in KernelSU.)
++  endif
++  ifneq ($(CONFIG_KSU_SUSFS),y)
++    $(error Devon SELinux policy support requires the SUSFS integration.)
++  endif
++  ccflags-y += -DKSU_COMPAT_DEVON_SELINUX_POLICY
++endif
++
+ ifdef CONFIG_KSU_TRACEPOINT_HOOK
+   $(info -- $(REPO_NAME): using Tracepoint Syscall Redirect Hook)
+ 
+diff --git a/kernel/Kconfig b/kernel/Kconfig
+index 79bc79e..9ef1554 100644
+--- a/kernel/Kconfig
++++ b/kernel/Kconfig
+@@ -112,6 +112,15 @@ config KSU_SUSFS
+ 
+ endchoice
+ 
++config KSU_DEVON_SELINUX_POLICY
++    bool "Moto G32 Linux 4.19 SELinux policy support"
++    depends on KSU = y && KSU_SUSFS && ARM64 && KALLSYMS_ALL
++    default n
++    help
++      Use the audited Motorola selinux_ss and pointer SID-table policy path.
++      Keep SELinux hooks managed by BakaSU on this non-GKI kernel.
++      Other kernel layouts are rejected at compile time.
++
+ menu "KernelSU - Manual Hook Auto hook"
+     depends on KSU_MANUAL_HOOK
+ 
+diff --git a/kernel/core/init.c b/kernel/core/init.c
+index 15e3410..84aff0f 100644
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -1,3 +1,6 @@
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++#include <linux/mutex.h>
++#endif
+ #include <linux/export.h>
+ #include <linux/fs.h>
+ #include <linux/kobject.h>
+@@ -138,6 +141,38 @@ static inline void __exit ksu_hook_exit(void)
+ #endif
+ }
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++static bool ksu_devon_cred_ready;
++static DEFINE_MUTEX(ksu_devon_cred_mutex);
++
++bool ksu_susfs_cred_ready(void)
++{
++    return smp_load_acquire(&ksu_devon_cred_ready);
++}
++
++int setup_ksu_cred(void)
++{
++    int ret;
++
++    /* Published credentials stay immutable after their first successful setup. */
++    mutex_lock(&ksu_devon_cred_mutex);
++    if (ksu_susfs_cred_ready()) {
++        ret = 0;
++        goto out;
++    }
++    ret = setup_ksu_cred_selinux();
++    if (ret)
++        goto out;
++    if (!init_session_keyring)
++        init_session_keyring = ksu_get_session_keyring(current_cred());
++    setup_ksu_cred_session_keyring();
++    smp_store_release(&ksu_devon_cred_ready, true);
++    ret = 0;
++out:
++    mutex_unlock(&ksu_devon_cred_mutex);
++    return ret;
++}
++#else
+ void setup_ksu_cred(void)
+ {
+     setup_ksu_cred_selinux();
+@@ -148,6 +183,8 @@ void setup_ksu_cred(void)
+     setup_ksu_cred_session_keyring();
+ }
+ 
++#endif
++
+ #ifdef CONFIG_KSU_DEBUG
+ bool allow_shell = true;
+ #else
+diff --git a/kernel/feature/selinux_hide.c b/kernel/feature/selinux_hide.c
+index 549c42a..422899f 100644
+--- a/kernel/feature/selinux_hide.c
++++ b/kernel/feature/selinux_hide.c
+@@ -46,6 +46,15 @@
+ #include "selinux_hide.h"
+ #include "compat/kernel_compat.h"
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++#include <linux/mm.h>
++#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 19, 0) || LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0) || \
++    !defined(KSU_COMPAT_USE_SELINUX_STATE) || !defined(KSU_COMPAT_SIDTAB_AS_REFERENCE) || \
++    defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT) || defined(KSU_COMPAT_HAS_POLICY_MUTEX)
++#error "devon SELinux policy requires the audited 4.19 selinux_ss and pointer sidtab layout"
++#endif
++#endif
++
+ #ifdef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
+ #define __maybe_static
+ 
+@@ -209,6 +218,29 @@ static void security_compute_av_user_with_policy(struct selinux_policy *policy,
+ static write_op_fn *context_write, *access_write;
+ static write_op_fn orig_context_write, orig_access_write;
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++/* Retain stock callbacks for readers queued while a feature is unhooked. */
++static write_op_fn ksu_devon_stock_context, ksu_devon_stock_access;
++static setprocattr_fn ksu_devon_stock_setprocattr;
++
++/* A positive return holds the hide mutex through the saved-policy operation. */
++static int ksu_devon_auto_begin(void)
++{
++    if (ksu_get_uid_t(current_uid()) < 10000)
++        return 0;
++    mutex_lock(&selinux_hide_mutex);
++    if (!ksu_selinux_hide_running) {
++        mutex_unlock(&selinux_hide_mutex);
++        return 0;
++    }
++    if (!backup_policydb || !backup_sidtab) {
++        mutex_unlock(&selinux_hide_mutex);
++        return -EAGAIN;
++    }
++    return 1;
++}
++#endif
++
+ // 6.6+ or 4.14-
+ // android has backport in 4.14
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) ||                                                                   \
+@@ -235,7 +267,7 @@ static inline u32 current_sid(void)
+ }
+ #endif
+ 
+-static ssize_t my_write_context(struct file *file, char *buf, size_t size)
++static ssize_t my_write_context_inner(struct file *file, char *buf, size_t size)
+ {
+     // apply to all app uids
+     if (likely(ksu_get_uid_t(current_uid()) < 10000)) {
+@@ -299,7 +331,24 @@ out:
+     return length;
+ }
+ 
+-static ssize_t my_write_access(struct file *file, char *buf, size_t size)
++static ssize_t my_write_context(struct file *file, char *buf, size_t size)
++{
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    int active = ksu_devon_auto_begin();
++    ssize_t ret;
++
++    if (active <= 0)
++        return active ? active : ksu_devon_stock_context(file, buf, size);
++    ret = my_write_context_inner(file, buf, size);
++    mutex_unlock(&selinux_hide_mutex);
++    return ret;
++#else
++    return my_write_context_inner(file, buf, size);
++#endif
++}
++
++
++static ssize_t my_write_access_inner(struct file *file, char *buf, size_t size)
+ {
+     // apply to all app uids
+     if (likely(ksu_get_uid_t(current_uid()) < 10000)) {
+@@ -392,6 +441,23 @@ out:
+     return length;
+ }
+ 
++static ssize_t my_write_access(struct file *file, char *buf, size_t size)
++{
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    int active = ksu_devon_auto_begin();
++    ssize_t ret;
++
++    if (active <= 0)
++        return active ? active : ksu_devon_stock_access(file, buf, size);
++    ret = my_write_access_inner(file, buf, size);
++    mutex_unlock(&selinux_hide_mutex);
++    return ret;
++#else
++    return my_write_access_inner(file, buf, size);
++#endif
++}
++
++
+ /*
+  * get the security ID of a set of credentials
+  */
+@@ -444,9 +510,9 @@ extern setprocattr_fn ksu_orig_setprocattr;
+ #endif
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0) || defined(KSU_COMPAT_SETPROCATTR_USE_NEW_PROTOTYPE)
+-int __nocfi ksu_handle_selinux_setprocattr(const char *name, void *value, size_t size)
++int __nocfi ksu_handle_selinux_setprocattr_inner(const char *name, void *value, size_t size)
+ #else
+-int __nocfi ksu_handle_selinux_setprocattr(struct task_struct *p, char *name, void *value, size_t size)
++int __nocfi ksu_handle_selinux_setprocattr_inner(struct task_struct *p, char *name, void *value, size_t size)
+ #endif
+ {
+     if (likely(ksu_get_uid_t(current_uid()) < 10000)) {
+@@ -547,10 +613,78 @@ call_orig:
+ #endif
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0) || defined(KSU_COMPAT_SETPROCATTR_USE_NEW_PROTOTYPE)
++int __nocfi ksu_handle_selinux_setprocattr(const char *name, void *value, size_t size)
++#else
++int __nocfi ksu_handle_selinux_setprocattr(struct task_struct *p, char *name, void *value, size_t size)
++#endif
++{
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    int active;
++    int ret;
++
++    if (strcmp(name, "current"))
++        return ksu_devon_stock_setprocattr(name, value, size);
++    active = ksu_devon_auto_begin();
++    if (active <= 0)
++        return active ? active : ksu_devon_stock_setprocattr(name, value, size);
++    ret = ksu_handle_selinux_setprocattr_inner(name, value, size);
++    mutex_unlock(&selinux_hide_mutex);
++    return ret;
++#else
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0) || defined(KSU_COMPAT_SETPROCATTR_USE_NEW_PROTOTYPE)
++    return ksu_handle_selinux_setprocattr_inner(name, value, size);
++#else
++    return ksu_handle_selinux_setprocattr_inner(p, name, value, size);
++#endif
++#endif
++}
++
+ typedef int (*sel_open_handle_status_fn)(struct inode *inode, struct file *filp);
+ static sel_open_handle_status_fn orig_sel_open_handle_status, *sel_open_handle_status_slot;
++
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++/* Per-file operations retain the page release callback across feature changes. */
++static struct file_operations ksu_devon_status_ops;
++
++static int ksu_devon_status_release(struct inode *inode, struct file *filp)
++{
++    put_page(filp->private_data);
++    filp->private_data = NULL;
++    return 0;
++}
++#endif
+ static int my_sel_open_handle_status(struct inode *inode, struct file *filp)
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    int ret;
++
++    mutex_lock(&selinux_hide_mutex);
++    mutex_lock(&selinux_state.ss->status_lock);
++    if (ksu_get_uid_t(current_uid()) >= 10000 && ksu_selinux_hide_running && fake_status) {
++        get_page(fake_status);
++        filp->private_data = fake_status;
++        mutex_unlock(&selinux_state.ss->status_lock);
++        replace_fops(filp, &ksu_devon_status_ops);
++        mutex_unlock(&selinux_hide_mutex);
++        return 0;
++    }
++    mutex_unlock(&selinux_state.ss->status_lock);
++    ret = orig_sel_open_handle_status(inode, filp);
++    if (!ret) {
++        get_page(filp->private_data);
++        replace_fops(filp, &ksu_devon_status_ops);
++#ifdef KSU_COMPAT_USE_STATIC_KEY
++        if (static_branch_unlikely(&fake_status_initialize_key))
++#else
++        if (!fake_status_initialize_key)
++#endif
++            initialize_fake_status();
++    }
++    mutex_unlock(&selinux_hide_mutex);
++    return ret;
++#else
++
+     if (likely(ksu_get_uid_t(current_uid()) >= 10000 && ksu_selinux_hide_enabled)) {
+         void *data;
+         mutex_lock(ksu_selinux_status_lock);
+@@ -573,6 +707,7 @@ static int my_sel_open_handle_status(struct inode *inode, struct file *filp)
+     }
+ #endif
+     return ret;
++#endif
+ }
+ 
+ static void hook_selinux_status_open()
+@@ -590,6 +725,14 @@ static void hook_selinux_status_open()
+             pr_err("selinux_hide: sel_handle_status_ops not found, fake status will not work\n");
+             return;
+         }
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++        if (ops->release) {
++            pr_err("devon: unexpected stock status release callback\n");
++            return;
++        }
++        ksu_devon_status_ops = *ops;
++        ksu_devon_status_ops.release = ksu_devon_status_release;
++#endif
+         sel_open_handle_status_slot = &ops->open;
+     }
+     sel_open_handle_status_fn new_fn = my_sel_open_handle_status;
+@@ -784,6 +927,10 @@ static int ksu_selinux_hide_enable()
+     pr_info("selinux_hide: context_write: 0x%lx [%pSb]\n", (unsigned long)*context_write, *context_write);
+     write_op_fn my = my_write_context;
+     orig_context_write = *context_write;
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    if (!ksu_devon_stock_context)
++        ksu_devon_stock_context = orig_context_write;
++#endif
+     ret = ksu_patch_text(context_write, &my, sizeof(my), KSU_PATCH_TEXT_FLUSH_DCACHE);
+     if (ret) {
+         pr_err("selinux_hide: init: patch_text context_write err: %d\n", ret);
+@@ -794,6 +941,10 @@ static int ksu_selinux_hide_enable()
+     pr_info("selinux_hide: access_write: 0x%lx [%pSb]\n", (unsigned long)*access_write, *access_write);
+     my = my_write_access;
+     orig_access_write = *access_write;
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    if (!ksu_devon_stock_access)
++        ksu_devon_stock_access = orig_access_write;
++#endif
+     ret = ksu_patch_text(access_write, &my, sizeof(my), KSU_PATCH_TEXT_FLUSH_DCACHE);
+     if (ret) {
+         pr_err("selinux_hide: init: patch_text access_write err: %d\n", ret);
+@@ -826,6 +977,10 @@ static int ksu_selinux_hide_enable()
+ #endif // #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+         selinux_setprocattr_hook_ptr = (unsigned long)&hp->hook.setprocattr;
+         ksu_orig_setprocattr = hp->hook.setprocattr;
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++        if (!ksu_devon_stock_setprocattr)
++            ksu_devon_stock_setprocattr = ksu_orig_setprocattr;
++#endif
+         setprocattr_fn my_setprocattr = ksu_handle_selinux_setprocattr;
+         ret =
+             ksu_patch_text(&hp->hook.setprocattr, &my_setprocattr, sizeof(my_setprocattr), KSU_PATCH_TEXT_FLUSH_DCACHE);
+@@ -954,11 +1109,24 @@ void __exit ksu_selinux_hide_exit()
+     }
+     mutex_unlock(&selinux_hide_mutex);
+     ksu_unregister_feature_handler(KSU_FEATURE_SELINUX_HIDE);
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    mutex_lock(&selinux_state.ss->status_lock);
++#else
+     mutex_lock(ksu_selinux_status_lock);
+-    if (fake_status)
++#endif
++    if (fake_status) {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++        put_page(fake_status);
++#else
+         __free_page(fake_status);
++#endif
++    }
+     fake_status = NULL;
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    mutex_unlock(&selinux_state.ss->status_lock);
++#else
+     mutex_unlock(ksu_selinux_status_lock);
++#endif
+ }
+ 
+ void ksu_selinux_hide_drop_backup_if_unused()
+@@ -1229,9 +1397,11 @@ static inline void ksu_unlock_sepolicy_legacy(void)
+ #endif
+ }
+ 
++// remove static in susfs
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
+-static int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
+-                                               u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p)
++__maybe_static int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext,
++                                                       u32 scontext_len, u32 *sid, u32 def_sid, gfp_t gfp_flags,
++                                                       u32 *orig_sid_p, int *orig_rc_p)
+ #else
+ static int ksu_security_context_to_sid(struct policydb *orig_policydb, struct sidtab *orig_sidtab,
+                                        struct policydb *policydb, struct sidtab *sidtab, const char *scontext,
+@@ -1247,7 +1417,14 @@ static int ksu_security_context_to_sid(struct policydb *orig_policydb, struct si
+     char *scontext2, *scontext3, *str = NULL;
+     struct context context, orig_context;
+     int rc = 0, orig_rc = 0;
+-    u32 orig_sid;
++    u32 orig_sid = SECSID_NULL;
++    bool orig_context_valid;
++
++    *sid = SECSID_NULL;
++    if (orig_sid_p)
++        *orig_sid_p = SECSID_NULL;
++    if (orig_rc_p)
++        *orig_rc_p = -EINVAL;
+ 
+     /* An empty security context is never valid. */
+     if (!scontext_len)
+@@ -1255,19 +1432,21 @@ static int ksu_security_context_to_sid(struct policydb *orig_policydb, struct si
+ 
+     /* Copy the string to allow changes and ensure a NUL terminator */
+     scontext2 = kmemdup_nul(scontext, scontext_len, gfp_flags);
+-    if (!scontext2)
++    if (!scontext2) {
++        if (orig_rc_p)
++            *orig_rc_p = -ENOMEM;
+         return -ENOMEM;
++    }
+ 
+     scontext3 = kmemdup_nul(scontext, scontext_len, gfp_flags);
+     if (!scontext3) {
++        if (orig_rc_p)
++            *orig_rc_p = -ENOMEM;
+         kfree(scontext2);
+         return -ENOMEM;
+     }
+ 
+     // removed: if (!selinux_initialized())
+-    *sid = SECSID_NULL;
+-    if (orig_sid_p)
+-        *orig_sid_p = SECSID_NULL;
+ 
+         // removed: if (force)
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
+@@ -1279,22 +1458,37 @@ static int ksu_security_context_to_sid(struct policydb *orig_policydb, struct si
+     sidtab = policy->sidtab;
+ #else
+     ksu_lock_sepolicy_legacy();
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    orig_policydb = &selinux_state.ss->policydb;
++    orig_sidtab = selinux_state.ss->sidtab;
++#endif
+ #endif
+     rc = string_to_context_struct(policydb, orig_policydb, sidtab, orig_sidtab, scontext2, scontext3, scontext_len,
+                                   &context, &orig_context, def_sid, &orig_rc);
++    orig_context_valid = !orig_rc;
+     if (!rc) {
+-        rc = sidtab_context_to_sid(sidtab, &context, sid);
++#ifdef KSU_COMPAT_HAS_CONTEXT_ADD_HASH
++        rc = context_add_hash(policydb, &context);
++#endif
++        if (!rc)
++            rc = sidtab_context_to_sid(sidtab, &context, sid);
+         // rc should not be frozen
+         context_destroy(&context);
+         // removed: if (rc == -ESTALE)
+         if (!orig_rc) {
+             // sync to global sidtab
+-            orig_rc = sidtab_context_to_sid(orig_sidtab, &orig_context, &orig_sid);
+-            if (orig_sid_p)
++#ifdef KSU_COMPAT_HAS_CONTEXT_ADD_HASH
++            orig_rc = context_add_hash(orig_policydb, &orig_context);
++#endif
++            if (!orig_rc)
++                orig_rc = sidtab_context_to_sid(orig_sidtab, &orig_context, &orig_sid);
++            if (!orig_rc && orig_sid_p)
+                 *orig_sid_p = orig_sid;
+-            context_destroy(&orig_context);
+         }
+     }
++    /* The live context can be valid even when the saved one is rejected. */
++    if (orig_context_valid)
++        context_destroy(&orig_context);
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
+     rcu_read_unlock();
+ #else
+@@ -2439,3 +2633,16 @@ allow:
+ }
+ #endif
+ #endif
++
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++/* Serialize policy transactions with backup retirement and feature changes. */
++void ksu_selinux_hide_lock(void)
++{
++    mutex_lock(&selinux_hide_mutex);
++}
++
++void ksu_selinux_hide_unlock(void)
++{
++    mutex_unlock(&selinux_hide_mutex);
++}
++#endif
+diff --git a/kernel/feature/selinux_hide.h b/kernel/feature/selinux_hide.h
+index aed77c6..8b35f3f 100644
+--- a/kernel/feature/selinux_hide.h
++++ b/kernel/feature/selinux_hide.h
+@@ -4,6 +4,12 @@
+ #include <linux/version.h>
+ #include <linux/sched.h>
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++/* Serialize saved-policy publication with readers and destruction. */
++void ksu_selinux_hide_lock(void);
++void ksu_selinux_hide_unlock(void);
++#endif
++
+ void ksu_selinux_hide_init();
+ void ksu_selinux_hide_exit();
+ void ksu_selinux_hide_drop_backup_if_unused();
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+index 42e01eb..61cad71 100644
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -369,6 +369,13 @@ static inline int do_ksu_handle_execveat_sucompat(int *fd, const char *filename,
+ 
+     pr_info("do_execveat_common su found\n");
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    if (!ksu_susfs_cred_ready())
++        return -EAGAIN;
++    /* The pinned escape helper reports zero for this denied transition. */
++    if (test_thread_flag(TIF_KSU_DISABLE_ESCAPE_WITH_ROOT))
++        return -EPERM;
++#endif
+     old_cred = override_creds(ksu_cred);
+     if (is_ksud_exists()) {
+         pr_info("%s su->sh!\n", __func__);
+@@ -381,7 +388,15 @@ static inline int do_ksu_handle_execveat_sucompat(int *fd, const char *filename,
+     revert_creds(old_cred);
+     pending_sucompat = ksu_sulog_capture_sucompat_manual(filename, *argv, GFP_KERNEL);
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    int escape_ret = escape_with_root_profile();
++    if (escape_ret) {
++        ksu_sulog_emit_pending(pending_sucompat, escape_ret, GFP_KERNEL);
++        return escape_ret;
++    }
++#else
+     escape_with_root_profile();
++#endif
+     memcpy((void *)filename, ksud_path, sizeof(ksud_path));
+ 
+     ksu_sulog_emit_pending(pending_sucompat, 0, GFP_KERNEL);
+@@ -393,9 +408,17 @@ static inline int do_ksu_handle_execveat_sucompat(int *fd, const char *filename,
+ // fd, filename, argv, envp, flags and retval were NOT provided in bprm_committed_creds (KSU_COMPAT_NO_POST_EXECVE_HOOK)!
+ int ksu_handle_post_execve(int *fd, const char *filename, void *argv, void *envp, int *flags, int *retval)
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    if (!test_and_clear_thread_flag(TIF_PROC_IN_KSU_EXECVE))
++        return -EINVAL;
++    if (!retval || *retval < 0)
++        return -EINVAL;
++#else
++
+     if (likely(!test_thread_flag(TIF_PROC_IN_KSU_EXECVE))) {
+         return -EINVAL;
+     }
++#endif
+ #ifndef KSU_COMPAT_HAS_SUSFS_INSTALL_SU_FD_DIRECT_CALL
+     ksu_install_su_fd();
+ #endif
+@@ -436,6 +459,9 @@ static inline void ksu_handle_execveat_init(const char *filename, void *envp)
+ 
+ int ksu_handle_execve(int *fd, const char *filename, void *argv, void *envp, int *flags)
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    clear_thread_flag(TIF_PROC_IN_KSU_EXECVE);
++#endif
+     struct ksu_sulog_pending_event *pending_root_execve = NULL;
+ 
+ #ifndef CONFIG_KSU_TRACEPOINT_HOOK
+@@ -524,9 +550,51 @@ int ksu_handle_post_execveat_sucompat(int *fd, struct filename **filename_ptr, v
+ #endif
+ #endif
+ 
++#if defined(CONFIG_KSU_SUSFS) && defined(KSU_COMPAT_DEVON_SELINUX_POLICY)
++static int ksu_devon_redirect_su_filename(struct filename **filename)
++{
++    const struct cred *old_cred;
++    struct filename *replacement;
++    bool exists;
++
++    if (!filename || IS_ERR_OR_NULL(*filename) || !(*filename)->name)
++        return -EINVAL;
++    if (ksu_is_current_proc_unprivillege() || !ksu_susfs_cred_ready())
++        return 0;
++#ifdef KSU_COMPAT_USE_STATIC_KEY
++    if (!static_branch_unlikely(&ksu_su_compat_enabled))
++        return 0;
++#else
++    if (!ksu_su_compat_enabled)
++        return 0;
++#endif
++    if (!ksu_is_allow_uid_for_current(ksu_get_uid_t(current_uid())))
++        return 0;
++    if (strcmp((*filename)->name, su_path))
++        return 0;
++
++    old_cred = override_creds(ksu_cred);
++    exists = is_ksud_exists();
++    revert_creds(old_cred);
++    if (!exists)
++        return 0;
++
++    /* Keep the original audit name intact and transfer one owned reference. */
++    replacement = getname_kernel(sh_path);
++    if (IS_ERR(replacement))
++        return PTR_ERR(replacement);
++    putname(*filename);
++    *filename = replacement;
++    return 0;
++}
++#endif
++
+ #ifdef CONFIG_KSU_SUSFS
+ int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags)
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    return ksu_devon_redirect_su_filename(filename);
++#else
+     const struct cred *old_cred;
+ 
+     // we no need harden this check, susfs already complete in caller
+@@ -554,6 +622,7 @@ int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *_
+ 
+     revert_creds(old_cred);
+     return 0;
++#endif
+ }
+ #else
+ int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *__unused_flags)
+@@ -601,6 +670,9 @@ int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
+ #ifdef CONFIG_KSU_SUSFS
+ int ksu_handle_stat(int *dfd, struct filename **filename, int *flags)
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    return ksu_devon_redirect_su_filename(filename);
++#else
+     const struct cred *old_cred;
+ 
+     // we no need harden this check, susfs already complete in caller
+@@ -633,6 +705,7 @@ int ksu_handle_stat(int *dfd, struct filename **filename, int *flags)
+ 
+     revert_creds(old_cred);
+     return 0;
++#endif
+ }
+ #else
+ int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags)
+diff --git a/kernel/feature/sucompat.h b/kernel/feature/sucompat.h
+index efdc23d..baf659b 100644
+--- a/kernel/feature/sucompat.h
++++ b/kernel/feature/sucompat.h
+@@ -15,6 +15,9 @@ void ksu_sucompat_exit(void);
+ 
+ // Handler functions exported for hook_manager
+ #ifdef CONFIG_KSU_SUSFS
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++#include <linux/ksu_susfs.h>
++#endif
+ int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags);
+ int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
+ #else
+@@ -44,7 +47,11 @@ long ksu_handle_execveat_sucompat_internal(const char __user **filename_user, in
+ #include <linux/susfs_def.h>
+ 
+ // sync with manual hook
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++#define TIF_PROC_IN_KSU_EXECVE KSU_SUSFS_TIF_IN_EXECVE
++#else
+ #define TIF_PROC_IN_KSU_EXECVE 61
++#endif
+ 
+ #define ksu_is_current_proc_unprivillege susfs_is_current_proc_no_su
+ #define ksu_set_current_proc_unprivillege susfs_set_current_proc_no_su
+diff --git a/kernel/hook/setuid_hook.c b/kernel/hook/setuid_hook.c
+index 7eb2de3..fcd2af6 100644
+--- a/kernel/hook/setuid_hook.c
++++ b/kernel/hook/setuid_hook.c
+@@ -27,6 +27,11 @@
+ #include "compat/kernel_compat.h"
+ #include "feature/kernel_umount.h"
+ #include "feature/sucompat.h"
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++#include <linux/user_namespace.h>
++#include "ksu.h"
++#include "selinux/selinux.h"
++#endif
+ #ifdef CONFIG_KSU_SUSFS
+ #include <linux/susfs_def.h>
+ #include <linux/workqueue.h>
+@@ -104,6 +109,9 @@ static int handle_zygote_next_setresuid(uid_t new_uid)
+ 
+     // - Disable seccomp restriction for root allowed apps since running with "su" will disable seccomp anyway
+     if (ksu_is_allow_uid_for_current(new_uid)) {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++        susfs_clear_current_proc_no_su();
++#endif
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+         if (current->seccomp.mode == SECCOMP_MODE_FILTER && current->seccomp.filter) {
+             spin_lock_irq(&current->sighand->siglock);
+@@ -180,6 +188,17 @@ int ksu_handle_setuid(uid_t new_uid, uid_t old_uid)
+ 
+ int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    /* Only a validated Android equal-UID transition reaches this target path. */
++    if (ruid == (uid_t)-1 || ruid != euid || euid != suid || current_user_ns() != &init_user_ns)
++        return 0;
++    if (!ksu_susfs_cred_ready()) {
++        if (is_zygote(current_cred()) || is_zygote_next(current_cred()))
++            susfs_set_current_proc_no_su();
++        return 0;
++    }
++#endif
++
+ #ifdef CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
+     return 0; // dummy hook here
+ #else
+diff --git a/kernel/hook/setuid_hook.h b/kernel/hook/setuid_hook.h
+index e956ec9..75989a7 100644
+--- a/kernel/hook/setuid_hook.h
++++ b/kernel/hook/setuid_hook.h
+@@ -3,6 +3,9 @@
+ 
+ #include <linux/init.h>
+ #include <linux/types.h>
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++#include <linux/ksu_susfs.h>
++#endif
+ 
+ void ksu_setuid_hook_init(void);
+ void ksu_setuid_hook_exit(void);
+diff --git a/kernel/include/ksu.h b/kernel/include/ksu.h
+index 2ebbc26..2eaec86 100644
+--- a/kernel/include/ksu.h
++++ b/kernel/include/ksu.h
+@@ -30,6 +30,11 @@ extern struct sidtab *backup_sidtab;
+ #endif
+ #define KSU_FULL_VERSION_STRING 255
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++int setup_ksu_cred(void);
++bool ksu_susfs_cred_ready(void);
++#else
+ void setup_ksu_cred(void);
++#endif
+ 
+ #endif
+diff --git a/kernel/runtime/ksud_integration.c b/kernel/runtime/ksud_integration.c
+index 3933473..fc261b5 100644
+--- a/kernel/runtime/ksud_integration.c
++++ b/kernel/runtime/ksud_integration.c
+@@ -33,6 +33,14 @@
+ #include <linux/static_key.h>
+ #include <linux/vmalloc.h>
+ #include <linux/stat.h>
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++#include <linux/ksu_susfs.h>
++#include <linux/list.h>
++#include <linux/mutex.h>
++#include <linux/sizes.h>
++#include <linux/kernel.h>
++#include <linux/spinlock.h>
++#endif
+ 
+ #include "arch.h"
+ #include "klog.h" // IWYU pragma: keep
+@@ -71,7 +79,9 @@ static const char KERNEL_SU_RC[] =
+     "\n";
+ // clang-format on
+ 
++#ifndef KSU_COMPAT_DEVON_SELINUX_POLICY
+ static void stop_init_rc_hook(void);
++#endif
+ static void stop_execve_hook(void);
+ 
+ // clang-format off
+@@ -103,12 +113,14 @@ static void stop_execve_hook(void);
+     #define ksu_init_rc_hook_inactive() (!static_branch_likely(&ksu_is_init_rc_hook_enabled))
+     #define ksu_input_hook_inactive() (!static_branch_likely(&ksu_is_input_hook_enabled))
+ 
++#ifndef KSU_COMPAT_DEVON_SELINUX_POLICY
+     static void stop_init_rc_hook(void)
+     {
+         if (static_key_enabled(&ksu_is_init_rc_hook_enabled))
+             static_branch_disable(&ksu_is_init_rc_hook_enabled);
+         pr_info("stop init_rc_hook!\n");
+     }
++#endif
+ 
+     static inline void stop_input_hook(void)
+     {
+@@ -269,9 +281,23 @@ void ksu_handle_execveat_ksud(const char *filename, struct user_arg_ptr *argv, s
+         if (!init_second_stage_executed && check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
+             pr_info("/system/bin/init second_stage executed via argv1 check\n");
+             ksu_selinux_hide_handle_second_stage();
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++            if (apply_kernelsu_rules()) {
++                pr_err("SELinux policy setup failed; leaving second stage incomplete\n");
++                return;
++            }
++#else
+             apply_kernelsu_rules();
++#endif
+             cache_sid();
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++            if (setup_ksu_cred()) {
++                pr_err("KSU credential setup failed; leaving second stage incomplete\n");
++                return;
++            }
++#else
+             setup_ksu_cred();
++#endif
+             init_second_stage_executed = true;
+         }
+     } else if (unlikely(!memcmp(filename, old_system_init, sizeof(old_system_init) - 1) && argv)) {
+@@ -288,9 +314,23 @@ void ksu_handle_execveat_ksud(const char *filename, struct user_arg_ptr *argv, s
+                 // But still init it to avoid we should handle more case
+                 ksu_selinux_hide_handle_second_stage();
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++                if (apply_kernelsu_rules()) {
++                    pr_err("SELinux policy setup failed; leaving second stage incomplete\n");
++                    return;
++                }
++#else
+                 apply_kernelsu_rules();
++#endif
+                 cache_sid();
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++                if (setup_ksu_cred()) {
++                    pr_err("KSU credential setup failed; leaving second stage incomplete\n");
++                    return;
++                }
++#else
+                 setup_ksu_cred();
++#endif
+                 init_second_stage_executed = true;
+             }
+         } else if (argc == 1 && !init_second_stage_executed && envp) {
+@@ -323,9 +363,23 @@ void ksu_handle_execveat_ksud(const char *filename, struct user_arg_ptr *argv, s
+                         // But still init it to avoid we should handle more case
+                         ksu_selinux_hide_handle_second_stage();
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++                        if (apply_kernelsu_rules()) {
++                            pr_err("SELinux policy setup failed; leaving second stage incomplete\n");
++                            return;
++                        }
++#else
+                         apply_kernelsu_rules();
++#endif
+                         cache_sid();
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++                        if (setup_ksu_cred()) {
++                            pr_err("KSU credential setup failed; leaving second stage incomplete\n");
++                            return;
++                        }
++#else
+                         setup_ksu_cred();
++#endif
+                         init_second_stage_executed = true;
+                         break;
+                     }
+@@ -345,6 +399,309 @@ void ksu_handle_execveat_ksud(const char *filename, struct user_arg_ptr *argv, s
+     }
+ }
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++/* Devon uses held-file inline hooks; published f_op/private_data stay native. */
++static bool is_init_rc(struct file *file);
++struct ksu_devon_rc_view {
++    struct list_head node;
++    struct file *file; /* Borrowed until the final __fput cleanup hook. */
++    loff_t base;
++    loff_t total;
++    const char *tail;
++    size_t tail_len;
++};
++static LIST_HEAD(ksu_devon_rc_views);
++static DEFINE_MUTEX(ksu_devon_rc_lock);
++static DEFINE_MUTEX(ksu_devon_rc_cache_lock);
++static char *ksu_devon_rc_tail;
++static size_t ksu_devon_rc_tail_len;
++static bool ksu_devon_rc_loaded;
++const size_t ksu_rc_len = sizeof(KERNEL_SU_RC) - 1;
++
++static bool ksu_devon_rc_owner(struct file *file)
++{
++    return file && file_count(file) > 0 && current->pid == 1 && current_uid().val == 0 &&
++           ksu_susfs_cred_ready() && is_init(current_cred()) &&
++           (file->f_mode & (FMODE_READ | FMODE_CAN_READ | FMODE_OPENED | FMODE_WRITE | FMODE_STREAM)) ==
++               (FMODE_READ | FMODE_CAN_READ | FMODE_OPENED) && !(file->f_flags & O_DIRECT);
++}
++
++static struct ksu_devon_rc_view *ksu_devon_rc_find(struct file *file)
++{
++    struct ksu_devon_rc_view *view;
++
++    list_for_each_entry(view, &ksu_devon_rc_views, node)
++        if (view->file == file)
++            return view;
++    return NULL;
++}
++
++/* Called with the install lock; failed loads remain retryable. */
++static int ksu_devon_rc_load(void)
++{
++    const struct cred *saved;
++    struct file *file;
++    char *module = NULL, *tail;
++    loff_t size, pos = 0;
++    size_t module_len = 0, total;
++    ssize_t got;
++    int ret = 0, first_error;
++
++    if (ksu_devon_rc_loaded)
++        return 0;
++    if (ksu_no_custom_rc)
++        goto make_tail;
++    saved = override_creds(ksu_cred);
++    file = filp_open("/metadata/watchdog/ksu/modules.rc", O_RDONLY | O_NONBLOCK, 0);
++    first_error = IS_ERR(file) ? PTR_ERR(file) : 0;
++    if (IS_ERR(file))
++        file = filp_open("/metadata/ksu/modules.rc", O_RDONLY | O_NONBLOCK, 0);
++    if (IS_ERR(file)) {
++        ret = PTR_ERR(file);
++        if ((ret == -ENOENT || ret == -ENOTDIR) &&
++            (first_error == -ENOENT || first_error == -ENOTDIR))
++            ret = 0;
++        else if (ret == -ENOENT || ret == -ENOTDIR)
++            ret = first_error;
++        goto revert;
++    }
++    if (!S_ISREG(file_inode(file)->i_mode)) {
++        ret = -EINVAL;
++        goto close;
++    }
++    size = i_size_read(file_inode(file));
++    if (size < 0 || size > SZ_1M) {
++        ret = size < 0 ? -EINVAL : -EFBIG;
++        goto close;
++    }
++    if (size) {
++        module = vmalloc(size);
++        if (!module) {
++            ret = -ENOMEM;
++            goto close;
++        }
++        while (pos < size) {
++            loff_t before = pos;
++
++            got = ksu_kernel_read_compat(file, module + pos, size - pos, &pos);
++            if (got <= 0 || got > size - before || pos != before + got) {
++                ret = got < 0 ? got : -EIO;
++                goto close;
++            }
++        }
++        module_len = size;
++    }
++close:
++    filp_close(file, NULL);
++revert:
++    revert_creds(saved);
++    if (ret)
++        goto out;
++make_tail:
++    total = ksu_rc_len + module_len; /* Both terms are bounded. */
++    tail = vmalloc(total);
++    if (!tail) {
++        ret = -ENOMEM;
++        goto out;
++    }
++    memcpy(tail, KERNEL_SU_RC, ksu_rc_len);
++    if (module_len)
++        memcpy(tail + ksu_rc_len, module, module_len);
++    /* Immutable boot cache; target Kconfig requires built-in KSU. */
++    ksu_devon_rc_tail = tail;
++    ksu_devon_rc_tail_len = total;
++    ksu_devon_rc_loaded = true;
++out:
++    vfree(module);
++    return ret;
++}
++
++/* Returned state is borrowed while the caller keeps its native file reference. */
++static int ksu_devon_rc_get(struct file *file, loff_t base,
++                            struct ksu_devon_rc_view **result)
++{
++    struct ksu_devon_rc_view *view, *candidate;
++    int ret;
++
++    *result = NULL;
++    if (!ksu_devon_rc_owner(file))
++        return 0;
++    mutex_lock(&ksu_devon_rc_lock);
++    view = ksu_devon_rc_find(file);
++    if (view) {
++        ret = i_size_read(file_inode(file)) != view->base ? -ESTALE : 0;
++        if (!ret)
++            *result = view;
++        mutex_unlock(&ksu_devon_rc_lock);
++        return ret;
++    }
++    mutex_unlock(&ksu_devon_rc_lock);
++    /* The captured view follows the open file, including pathname renames. */
++    if (ksu_init_rc_hook_inactive() || !is_init_rc(file))
++        return 0;
++    if (base < 0)
++        return -EOVERFLOW;
++
++    /* Keep filesystem I/O outside the view/close lock. */
++    mutex_lock(&ksu_devon_rc_cache_lock);
++    ret = ksu_devon_rc_load();
++    mutex_unlock(&ksu_devon_rc_cache_lock);
++    if (ret)
++        return ret;
++    if (base > LLONG_MAX - (loff_t)ksu_devon_rc_tail_len)
++        return -EOVERFLOW;
++    candidate = kzalloc(sizeof(*candidate), GFP_KERNEL);
++    if (!candidate)
++        return -ENOMEM;
++    candidate->file = file;
++    candidate->base = base;
++    candidate->total = base + ksu_devon_rc_tail_len;
++    candidate->tail = ksu_devon_rc_tail;
++    candidate->tail_len = ksu_devon_rc_tail_len;
++
++    mutex_lock(&ksu_devon_rc_lock);
++    view = ksu_devon_rc_find(file);
++    if (view) {
++        ret = i_size_read(file_inode(file)) != view->base ? -ESTALE : 0;
++        if (!ret)
++            *result = view;
++        kfree(candidate);
++    } else {
++        list_add(&candidate->node, &ksu_devon_rc_views);
++        *result = candidate;
++        ret = 0;
++    }
++    mutex_unlock(&ksu_devon_rc_lock);
++    return ret;
++}
++
++int ksu_handle_vfs_fstat_file(struct file *file, loff_t *size)
++{
++    struct ksu_devon_rc_view *view;
++    int ret = ksu_devon_rc_get(file, *size, &view);
++
++    if (!ret && view)
++        *size = view->total;
++    return ret;
++}
++
++/* 0: native prefix read; 1: logical tail/EOF handled; negative: real error. */
++int ksu_handle_sys_read_file(struct file *file, char __user *buf, size_t *count,
++                             loff_t *pos, ssize_t *result)
++{
++    struct ksu_devon_rc_view *view;
++    size_t wanted, copied;
++    int ret;
++
++    if (!*count)
++        return 0;
++    ret = ksu_devon_rc_get(file, i_size_read(file_inode(file)), &view);
++    if (ret || !view)
++        return ret;
++    if (*pos < 0)
++        return -EINVAL;
++    if (*pos < view->base) {
++        *count = min_t(size_t, *count, view->base - *pos);
++        return 0;
++    }
++    if (*pos >= view->total) {
++        *result = 0;
++        return 1;
++    }
++    wanted = min_t(size_t, *count, view->total - *pos);
++    copied = wanted - copy_to_user(buf, view->tail + (*pos - view->base), wanted);
++    *pos += copied;
++    *result = copied ? copied : -EFAULT;
++    return 1;
++}
++
++int ksu_handle_initrc_iter_file(struct file *file, struct iov_iter *iter,
++                                loff_t *pos, size_t *limit, bool synchronous,
++                                ssize_t *result)
++{
++    struct ksu_devon_rc_view *view;
++    size_t copied;
++    int ret;
++
++    if (!*limit || !ksu_devon_rc_owner(file))
++        return 0;
++    /* This staged overlay supports synchronous init reads only. */
++    if (!synchronous) {
++        bool captured;
++
++        mutex_lock(&ksu_devon_rc_lock);
++        captured = ksu_devon_rc_find(file) != NULL;
++        mutex_unlock(&ksu_devon_rc_lock);
++        return captured || (!ksu_init_rc_hook_inactive() && is_init_rc(file)) ? -EOPNOTSUPP : 0;
++    }
++    ret = ksu_devon_rc_get(file, i_size_read(file_inode(file)), &view);
++    if (ret || !view)
++        return ret;
++    if (*pos < 0)
++        return -EINVAL;
++    if (*pos < view->base) {
++        *limit = min_t(size_t, *limit, view->base - *pos);
++        return 0;
++    }
++    if (*pos >= view->total) {
++        *result = 0;
++        return 1;
++    }
++    copied = copy_to_iter(view->tail + (*pos - view->base),
++                          min_t(size_t, *limit, view->total - *pos), iter);
++    *pos += copied;
++    *result = copied ? copied : -EFAULT;
++    return 1;
++}
++
++ssize_t ksu_handle_initrc_read_result(struct file *file, loff_t before, ssize_t result)
++{
++    struct ksu_devon_rc_view *view;
++
++    if (result || !ksu_devon_rc_owner(file))
++        return result;
++    mutex_lock(&ksu_devon_rc_lock);
++    view = ksu_devon_rc_find(file);
++    if (view && before >= 0 && before < view->base)
++        result = -EIO; /* Do not report logical EOF before the captured prefix. */
++    mutex_unlock(&ksu_devon_rc_lock);
++    return result;
++}
++
++int ksu_handle_initrc_seek_file(struct file *file, loff_t offset, int whence,
++                                loff_t *result)
++{
++    struct ksu_devon_rc_view *view;
++    int ret;
++
++    if (whence != SEEK_END && whence != SEEK_DATA && whence != SEEK_HOLE)
++        return 0;
++    ret = ksu_devon_rc_get(file, i_size_read(file_inode(file)), &view);
++    if (ret || !view)
++        return ret;
++    if (whence != SEEK_END)
++        return -EOPNOTSUPP;
++    if (offset > LLONG_MAX - view->total)
++        return -EOVERFLOW;
++    *result = generic_file_llseek_size(file, offset, whence,
++                                      file_inode(file)->i_sb->s_maxbytes, view->total);
++    return 1;
++}
++
++void ksu_handle_initrc_file_release(struct file *file)
++{
++    struct ksu_devon_rc_view *view;
++
++    /* __fput has no remaining file users; remove state before object reuse. */
++    mutex_lock(&ksu_devon_rc_lock);
++    view = ksu_devon_rc_find(file);
++    if (view) {
++        list_del(&view->node);
++        kfree(view);
++    }
++    mutex_unlock(&ksu_devon_rc_lock);
++}
++#else
+ static ssize_t (*orig_read)(struct file *, char __user *, size_t, loff_t *);
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0) || defined(KSU_HAS_FOP_READ_ITER)
+ static ssize_t (*orig_read_iter)(struct kiocb *, struct iov_iter *);
+@@ -560,6 +917,8 @@ append_module_rc:
+ }
+ #endif
+ 
++#endif
++
+ static bool is_init_rc(struct file *fp)
+ {
+     if (strcmp(current->comm, "init")) {
+@@ -682,6 +1041,14 @@ void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_pt
+ #ifdef CONFIG_KSU_SUSFS
+ void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr)
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    struct file *file = fget(fd);
++
++    if (file) {
++        ksu_handle_vfs_fstat_file(file, kstat_size_ptr);
++        fput(file);
++    }
++#else
+     struct file *file = fget(fd);
+ 
+     if (!file)
+@@ -700,11 +1067,18 @@ void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr)
+         *kstat_size_ptr = new_size;
+     }
+     fput(file);
++#endif
+ }
+ #endif // #ifdef CONFIG_KSU_SUSFS
+ 
+ void ksu_handle_initrc(struct file *file)
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    struct ksu_devon_rc_view *view;
++
++    if (file)
++        ksu_devon_rc_get(file, i_size_read(file_inode(file)), &view);
++#else
+     if (!file) {
+         return;
+     }
+@@ -751,9 +1125,10 @@ void ksu_handle_initrc(struct file *file)
+ #endif
+     // replace the file_operations
+     file->f_op = &fops_proxy;
++#endif
+ }
+ 
+-#ifndef CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
++#if !defined(CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK) && !defined(KSU_COMPAT_DEVON_SELINUX_POLICY)
+ static void ksu_handle_sys_read_fd(unsigned int fd)
+ {
+     struct file *file = fget(fd);
+@@ -769,6 +1144,20 @@ static void ksu_handle_sys_read_fd(unsigned int fd)
+ 
+ int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr)
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    struct ksu_devon_rc_view *view;
++    struct file *file;
++    int ret = 0;
++
++    if (!count_ptr || !*count_ptr)
++        return 0;
++    file = fget(fd);
++    if (file) {
++        ret = ksu_devon_rc_get(file, i_size_read(file_inode(file)), &view);
++        fput(file);
++    }
++    return ret;
++#else
+ #ifdef CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+     return 0; // dummy hook here
+ #else
+@@ -777,8 +1166,14 @@ int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_pt
+ 
+     return 0;
+ #endif
++#endif
+ }
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++/* Input takes event_lock first; stopping never takes an input device lock. */
++static DEFINE_SPINLOCK(ksu_devon_input_lock);
++static bool ksu_devon_input_stopped;
++#endif
+ static unsigned int volumedown_pressed_count = 0;
+ 
+ static bool is_volumedown_enough(unsigned int count)
+@@ -788,7 +1183,20 @@ static bool is_volumedown_enough(unsigned int count)
+ 
+ int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value)
+ {
+-#ifdef CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    unsigned long flags;
++
++    if (ksu_input_hook_inactive() || *type != EV_KEY ||
++        *code != KEY_VOLUMEDOWN || *value != 1)
++        return 0;
++
++    spin_lock_irqsave(&ksu_devon_input_lock, flags);
++    if (!ksu_devon_input_stopped &&
++        !is_volumedown_enough(volumedown_pressed_count))
++        volumedown_pressed_count++;
++    spin_unlock_irqrestore(&ksu_devon_input_lock, flags);
++    return 0;
++#elif defined(CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK)
+     return 0; // dummy manual hook
+ #else
+     if (ksu_input_hook_inactive())
+@@ -926,6 +1334,20 @@ void ksu_stop_ksud_execve_hook(void)
+ 
+ bool ksu_is_safe_mode()
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    unsigned long flags;
++    unsigned int count;
++
++    if (ksu_late_loaded)
++        return false;
++
++    /* Called by the process-context driver query; freeze before sampling. */
++    ksu_stop_input_hook_runtime();
++    spin_lock_irqsave(&ksu_devon_input_lock, flags);
++    count = volumedown_pressed_count;
++    spin_unlock_irqrestore(&ksu_devon_input_lock, flags);
++    return is_volumedown_enough(count);
++#else
+     static bool safe_mode = false;
+     if (safe_mode) {
+         // don't need to check again, userspace may call multiple times
+@@ -948,6 +1370,7 @@ bool ksu_is_safe_mode()
+     }
+ 
+     return false;
++#endif
+ }
+ 
+ #ifdef CONFIG_KSU_TRACEPOINT_HOOK
+@@ -1063,12 +1486,26 @@ static void do_stop_input_hook(struct work_struct *work)
+ 
+ void ksu_stop_input_hook_runtime(void)
+ {
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    unsigned long flags;
++    bool stopped;
++
++    spin_lock_irqsave(&ksu_devon_input_lock, flags);
++    stopped = ksu_devon_input_stopped;
++    ksu_devon_input_stopped = true;
++    spin_unlock_irqrestore(&ksu_devon_input_lock, flags);
++
++    /* Jump-label patching can sleep: only boot/query process paths stop it. */
++    if (!stopped)
++        stop_input_hook();
++#else
+     static bool input_hook_stopped = false;
+     if (input_hook_stopped) {
+         return;
+     }
+     input_hook_stopped = true;
+     stop_input_hook();
++#endif
+ }
+ 
+ // ksud: module support
+@@ -1102,5 +1539,7 @@ void __exit ksu_ksud_exit(void)
+ #ifdef CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
+     vol_detector_exit();
+ #endif
++#ifndef KSU_COMPAT_DEVON_SELINUX_POLICY
+     volumedown_pressed_count = 0;
++#endif
+ }
+diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
+index 4544b3d..26ae00b 100644
+--- a/kernel/selinux/rules.c
++++ b/kernel/selinux/rules.c
+@@ -15,6 +15,9 @@
+ #include "linux/lsm_audit.h" // IWYU pragma: keep
+ #include "xfrm.h"
+ #include "infra/symbol_resolver.h"
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++#include "feature/selinux_hide.h"
++#endif
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
+ #define SELINUX_POLICY_INSTEAD_SELINUX_SS
+@@ -139,6 +142,234 @@ static inline void ksu_unlock_sepolicy_legacy(void)
+ 
+ #endif // KSU_COMPAT_HAS_POLICY_MUTEX
+ 
++static bool ksu_apply_default_rules(struct policydb *db)
++{
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    if (!ksu_type(db, KERNEL_SU_DOMAIN, "domain"))
++        return false;
++#else
++    ksu_type(db, KERNEL_SU_DOMAIN, "domain");
++#endif
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    if (!ksu_permissive(db, KERNEL_SU_DOMAIN))
++        return false;
++#else
++    ksu_permissive(db, KERNEL_SU_DOMAIN);
++#endif
++    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject");
++    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "netdomain");
++    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "bluetoothdomain");
++
++    // Create unconstrained file type
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    if (!ksu_type(db, KERNEL_SU_FILE, "file_type"))
++        return false;
++#else
++    ksu_type(db, KERNEL_SU_FILE, "file_type");
++#endif
++    ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject");
++    ksu_allow(db, "domain", KERNEL_SU_FILE, ALL, ALL);
++
++    // allow all!
++    ksu_allow(db, KERNEL_SU_DOMAIN, ALL, ALL, ALL);
++
++    // allow us do any ioctl
++    if (db->policyvers >= POLICYDB_VERSION_XPERMS_IOCTL) {
++        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "blk_file", ALL);
++        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "fifo_file", ALL);
++        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "chr_file", ALL);
++        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "file", ALL);
++    }
++
++    // our ksud triggered by init
++    ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);
++
++    // restored from https://github.com/tiann/KernelSU/pull/3031
++    ksu_allow(db, "init", "adb_data_file", "file", ALL);
++    ksu_allow(db, "init", "adb_data_file", "dir", ALL); // #1289
++
++    // copied from Magisk rules
++    // suRights
++    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "search");
++    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "read");
++    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "file", "open");
++    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "file", "read");
++    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "process", "sigchld");
++
++    // allowLog
++    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "dir", "search");
++    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "read");
++    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "open");
++    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "getattr");
++
++    // dumpsys, send fd
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fd", "use");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "write");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "read");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "open");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "getattr");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "read");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "write");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "connectto");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getopt");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getattr");
++
++    // use memfd created by su domain
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "execute");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "getattr");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "map");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "read");
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "write");
++
++    // bootctl
++    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "dir", "search");
++    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "read");
++    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "open");
++    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
++
++    // Allow all binder transactions
++    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "binder", ALL);
++
++    // Allow system server kill su process
++    ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
++    ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
++
++    return true;
++}
++
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++/* Protected by selinux_hide_mutex, including after the backup is dropped. */
++static bool ksu_devon_stock_captured;
++
++struct ksu_devon_policy_tx {
++    struct policydb *pair;
++    struct policydb *live;
++    struct policydb *saved;
++    struct sidtab *saved_sidtab;
++    struct selinux_fs_info *fsi;
++    bool cloned;
++    bool saved_cloned;
++    bool saved_sids_ready;
++};
++
++/* End owns every private allocation; failed parsers already destroy internals. */
++static void ksu_devon_policy_end(struct ksu_devon_policy_tx *tx, bool install)
++{
++    if (install) {
++        write_lock_irq(&selinux_state.ss->policy_rwlock);
++        memcpy(tx->pair, tx->live, sizeof(*tx->live));
++        memcpy(tx->live, tx->pair + 1, sizeof(*tx->live));
++        write_unlock_irq(&selinux_state.ss->policy_rwlock);
++        tx->cloned = false; /* The live state owns the replacement internals. */
++        if (tx->saved_sids_ready) {
++            backup_policydb = tx->saved;
++            backup_sidtab = tx->saved_sidtab;
++            tx->saved = NULL;
++            tx->saved_sidtab = NULL;
++            tx->saved_cloned = false;
++            tx->saved_sids_ready = false;
++            ksu_devon_stock_captured = true;
++        }
++        reset_avc_cache();
++        ksu_destroy_policydb(tx->pair);
++    } else if (tx->cloned) {
++        ksu_destroy_policydb(tx->pair + 1);
++    }
++    if (tx->saved_sids_ready)
++        sidtab_destroy(tx->saved_sidtab);
++    if (tx->saved_cloned)
++        ksu_destroy_policydb(tx->saved);
++    kfree(tx->saved_sidtab);
++    kfree(tx->saved);
++    kfree(tx->pair);
++    mutex_unlock(&tx->fsi->mutex);
++    ksu_selinux_hide_unlock();
++}
++
++static int ksu_devon_policy_begin(struct ksu_devon_policy_tx *tx, bool initial)
++{
++    int ret = -EAGAIN;
++
++    memset(tx, 0, sizeof(*tx));
++    /* Order: hide mutex -> selinuxfs mutex -> policy rwlock. */
++    ksu_selinux_hide_lock();
++    if (!selinux_state.ss || !selinux_initialized(&selinux_state) ||
++        !selinuxfs_mount || IS_ERR(selinuxfs_mount) ||
++        !selinuxfs_mount->mnt_sb || !selinuxfs_mount->mnt_sb->s_fs_info)
++        goto out_hide;
++    if (!initial && !ksu_devon_stock_captured)
++        goto out_hide;
++
++    tx->fsi = selinuxfs_mount->mnt_sb->s_fs_info;
++    mutex_lock(&tx->fsi->mutex);
++    tx->live = &selinux_state.ss->policydb;
++    tx->pair = kcalloc(2, sizeof(*tx->pair), GFP_KERNEL);
++    if (!tx->pair) {
++        ret = -ENOMEM;
++        goto out_tx;
++    }
++    ret = ksu_dup_policydb(tx->live, tx->pair + 1);
++    if (ret < 0)
++        goto out_tx;
++    tx->cloned = true;
++    return 0;
++
++out_tx:
++    ksu_devon_policy_end(tx, false);
++    return ret;
++out_hide:
++    ksu_selinux_hide_unlock();
++    return ret;
++}
++
++static int ksu_devon_prepare_backup(struct ksu_devon_policy_tx *tx)
++{
++    int ret;
++
++    /* Never overwrite the first snapshot or recreate one from modified policy. */
++    if (ksu_devon_stock_captured)
++        return 0;
++    if (backup_policydb || backup_sidtab)
++        return -EUCLEAN;
++    tx->saved = kzalloc(sizeof(*tx->saved), GFP_KERNEL);
++    if (!tx->saved)
++        return -ENOMEM;
++    ret = ksu_dup_policydb(tx->live, tx->saved);
++    if (ret < 0)
++        return ret;
++    tx->saved_cloned = true;
++    tx->saved_sidtab = kzalloc(sizeof(*tx->saved_sidtab), GFP_KERNEL);
++    if (!tx->saved_sidtab)
++        return -ENOMEM;
++    ret = policydb_load_isids(tx->saved, tx->saved_sidtab);
++    if (ret)
++        return ret;
++    tx->saved_sids_ready = true;
++    return 0;
++}
++
++int apply_kernelsu_rules(void)
++{
++    struct ksu_devon_policy_tx tx;
++    int ret;
++
++    ret = ksu_devon_policy_begin(&tx, true);
++    if (ret)
++        return ret;
++    ret = ksu_devon_prepare_backup(&tx);
++    if (ret) {
++        ksu_devon_policy_end(&tx, false);
++        return ret;
++    }
++    if (!ksu_apply_default_rules(tx.pair + 1)) {
++        ksu_devon_policy_end(&tx, false);
++        return -EINVAL;
++    }
++    ksu_devon_policy_end(&tx, true);
++    return 0;
++}
++#else
+ void apply_kernelsu_rules()
+ {
+     struct policydb *db;
+@@ -233,81 +464,7 @@ void apply_kernelsu_rules()
+     }
+ #endif
+ 
+-    ksu_type(db, KERNEL_SU_DOMAIN, "domain");
+-    ksu_permissive(db, KERNEL_SU_DOMAIN);
+-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject");
+-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "netdomain");
+-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "bluetoothdomain");
+-
+-    // Create unconstrained file type
+-    ksu_type(db, KERNEL_SU_FILE, "file_type");
+-    ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject");
+-    ksu_allow(db, "domain", KERNEL_SU_FILE, ALL, ALL);
+-
+-    // allow all!
+-    ksu_allow(db, KERNEL_SU_DOMAIN, ALL, ALL, ALL);
+-
+-    // allow us do any ioctl
+-    if (db->policyvers >= POLICYDB_VERSION_XPERMS_IOCTL) {
+-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "blk_file", ALL);
+-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "fifo_file", ALL);
+-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "chr_file", ALL);
+-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "file", ALL);
+-    }
+-
+-    // our ksud triggered by init
+-    ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);
+-
+-    // restored from https://github.com/tiann/KernelSU/pull/3031
+-    ksu_allow(db, "init", "adb_data_file", "file", ALL);
+-    ksu_allow(db, "init", "adb_data_file", "dir", ALL); // #1289
+-
+-    // copied from Magisk rules
+-    // suRights
+-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "search");
+-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "read");
+-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "file", "open");
+-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "file", "read");
+-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "process", "sigchld");
+-
+-    // allowLog
+-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "dir", "search");
+-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "read");
+-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "open");
+-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "getattr");
+-
+-    // dumpsys, send fd
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fd", "use");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "write");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "read");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "open");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "getattr");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "read");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "write");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "connectto");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getopt");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getattr");
+-
+-    // use memfd created by su domain
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "execute");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "getattr");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "map");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "read");
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "write");
+-
+-    // bootctl
+-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "dir", "search");
+-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "read");
+-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "open");
+-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
+-
+-    // Allow all binder transactions
+-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "binder", ALL);
+-
+-    // Allow system server kill su process
+-    ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
+-    ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
++    ksu_apply_default_rules(db);
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_POLICY_MUTEX)
+     rcu_assign_pointer(selinux_state.policy, pol);
+@@ -337,6 +494,7 @@ out_free:
+     ksu_unlock_sel_mutex_legacy();
+ #endif
+ }
++#endif /* KSU_COMPAT_DEVON_SELINUX_POLICY */
+ 
+ #define KSU_SEPOLICY_MAX_BATCH_SIZE (8U * 1024U * 1024U)
+ #define KSU_SEPOLICY_MAX_ARGS 5
+@@ -611,6 +769,9 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
+     int ret = 0;
+     int success_cmd_count = 0;
+     u32 cmd_index = 0;
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    struct ksu_devon_policy_tx tx;
++#endif
+ 
+     if (!user_data || !data_len)
+         return -EINVAL;
+@@ -649,6 +810,11 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
+         goto out_unlock;
+     }
+     db = &pol->policydb;
++#elif defined(KSU_COMPAT_DEVON_SELINUX_POLICY)
++    ret = ksu_devon_policy_begin(&tx, false);
++    if (ret)
++        goto out_free;
++    db = tx.pair + 1;
+ #else
+     int len = 0;
+ 
+@@ -727,6 +893,9 @@ out_drop_new_policy:
+     ksu_destroy_sepolicy(pol);
+ out_unlock:
+     mutex_unlock(&selinux_state.policy_mutex);
++#elif defined(KSU_COMPAT_DEVON_SELINUX_POLICY)
++    ksu_devon_policy_end(&tx, true);
++    ret = success_cmd_count;
+ #else
+     ret = success_cmd_count;
+     /* Save the old policydb to free later. */
+@@ -747,13 +916,18 @@ out_unlock:
+ #endif
+ out_free:
+     vfree(payload);
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && !defined(KSU_COMPAT_HAS_POLICY_MUTEX)
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && !defined(KSU_COMPAT_HAS_POLICY_MUTEX) && \
++    !defined(KSU_COMPAT_DEVON_SELINUX_POLICY)
+     ksu_unlock_sel_mutex_legacy();
+ #endif
+ 
+     return ret;
+ 
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && !defined(KSU_COMPAT_HAS_POLICY_MUTEX)
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++out_drop_new_policy:
++    ksu_devon_policy_end(&tx, false);
++    goto out_free;
++#elif LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && !defined(KSU_COMPAT_HAS_POLICY_MUTEX)
+ out_drop_new_policy:
+     ksu_destroy_policydb(newpolicydb);
+     kfree(oldpolicydb);
+diff --git a/kernel/selinux/selinux.c b/kernel/selinux/selinux.c
+index bf9ba1f..fb76fda 100644
+--- a/kernel/selinux/selinux.c
++++ b/kernel/selinux/selinux.c
+@@ -47,6 +47,10 @@ static int transive_to_domain(const char *domain, struct cred *cred, bool clear_
+     if (error) {
+         pr_info("security_secctx_to_secid %s -> sid: %d, error: %d\n", domain, sid, error);
+     }
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    if (!error && !sid)
++        error = -EINVAL;
++#endif
+     if (!error) {
+         tsec->sid = sid;
+         tsec->create_sid = 0;
+@@ -67,6 +71,14 @@ void setup_selinux(const char *domain, struct cred *cred)
+     }
+ }
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++int setup_ksu_cred_selinux(void)
++{
++    if (!ksu_cred)
++        return -EAGAIN;
++    return transive_to_domain(KERNEL_SU_CONTEXT, ksu_cred, false);
++}
++#else
+ void setup_ksu_cred_selinux(void)
+ {
+     if (ksu_cred && transive_to_domain(KERNEL_SU_CONTEXT, ksu_cred, false)) {
+@@ -74,6 +86,8 @@ void setup_ksu_cred_selinux(void)
+     }
+ }
+ 
++#endif
++
+ void setenforce(bool enforce)
+ {
+     __setenforce(enforce);
+diff --git a/kernel/selinux/selinux.h b/kernel/selinux/selinux.h
+index 905c8f2..53b1237 100644
+--- a/kernel/selinux/selinux.h
++++ b/kernel/selinux/selinux.h
+@@ -44,11 +44,19 @@ static inline bool is_zygote_next(const struct cred *cred)
+ 
+ bool is_init(const struct cred *cred);
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++int apply_kernelsu_rules(void);
++#else
+ void apply_kernelsu_rules(void);
++#endif
+ 
+ int handle_sepolicy(void __user *user_data, u64 data_len);
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++int setup_ksu_cred_selinux(void);
++#else
+ void setup_ksu_cred_selinux(void);
++#endif
+ 
+ bool ksu_is_sid_equal(const struct cred *cred, u32 sid2);
+ void ksu_set_zygote_sid(void);
+diff --git a/kernel/selinux/sepolicy.c b/kernel/selinux/sepolicy.c
+index 288d55b..459ad9f 100644
+--- a/kernel/selinux/sepolicy.c
++++ b/kernel/selinux/sepolicy.c
+@@ -4,6 +4,8 @@
+ #include <linux/version.h>
+ #include <linux/vmalloc.h>
+ #include <linux/mutex.h>
++#include <linux/overflow.h>
++#include <linux/kernel.h>
+ 
+ #include "ss/avtab.h"
+ #include "ss/constraint.h"
+@@ -690,9 +692,142 @@ static bool add_genfscon(struct policydb *db, const char *fs_name, const char *p
+ #define ksu_kvrealloc(p, new_size, old_size) ksu_compat_kvrealloc(p, old_size, new_size, GFP_KERNEL)
+ #endif
+ 
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++#if defined(KSU_COMPAT_HAS_MODERN_POLICYDB) || defined(KSU_COMPAT_TYPE_ATTR_MAP_ARRAY_NOT_FOUND)
++#error "devon type creation requires the audited flex-array policydb layout"
++#endif
++/* The caller owns a private policy; no published field changes before insert. */
++static bool ksu_devon_add_type(struct policydb *db, const char *type_name, bool attr)
++{
++    struct type_datum *type = NULL;
++    struct flex_array *maps = NULL, *types = NULL, *names = NULL;
++    struct flex_array *old_maps, *old_types, *old_names;
++    struct ebitmap self, *roles = NULL, *old_map;
++    char *key = NULL, *old_name;
++    struct type_datum *old_type;
++    u32 count, value, i;
++
++    ebitmap_init(&self);
++    if (!db || !type_name || !*type_name || !db->p_types.table)
++        return false;
++    if (symtab_search(&db->p_types, type_name))
++        return true;
++
++    count = db->p_types.nprim;
++    if (count >= INT_MAX || !db->type_attr_map_array ||
++        !db->type_val_to_struct_array || !db->sym_val_to_name[SYM_TYPES] ||
++        (db->p_roles.nprim && !db->role_val_to_struct))
++        return false;
++    old_maps = db->type_attr_map_array;
++    old_types = db->type_val_to_struct_array;
++    old_names = db->sym_val_to_name[SYM_TYPES];
++    if (old_maps->element_size != sizeof(struct ebitmap) ||
++        old_types->element_size != sizeof(struct type_datum *) ||
++        old_names->element_size != sizeof(char *) ||
++        old_maps->total_nr_elements < 0 || old_types->total_nr_elements < 0 ||
++        old_names->total_nr_elements < 0 ||
++        count > (u32)old_maps->total_nr_elements ||
++        count > (u32)old_types->total_nr_elements ||
++        count > (u32)old_names->total_nr_elements)
++        return false;
++    value = count + 1;
++
++    type = kzalloc(sizeof(*type), GFP_KERNEL);
++    if (!type)
++        goto out;
++    type->primary = 1;
++    type->value = value;
++    type->attribute = attr;
++    key = kstrdup(type_name, GFP_KERNEL);
++    if (!key)
++        goto out;
++
++    maps = flex_array_alloc(sizeof(struct ebitmap), value, GFP_KERNEL | __GFP_ZERO);
++    if (!maps)
++        goto out;
++    types = flex_array_alloc(sizeof(struct type_datum *), value, GFP_KERNEL | __GFP_ZERO);
++    if (!types)
++        goto out;
++    names = flex_array_alloc(sizeof(char *), value, GFP_KERNEL | __GFP_ZERO);
++    if (!names)
++        goto out;
++    if (flex_array_prealloc(maps, 0, value, GFP_KERNEL | __GFP_ZERO) ||
++        flex_array_prealloc(types, 0, value, GFP_KERNEL | __GFP_ZERO) ||
++        flex_array_prealloc(names, 0, value, GFP_KERNEL | __GFP_ZERO))
++        goto out;
++
++    /* Copy logical entries, not spare capacity. Old bitmap nodes are borrowed. */
++    for (i = 0; i < count; i++) {
++        old_map = flex_array_get(old_maps, i);
++        old_type = flex_array_get_ptr(old_types, i);
++        old_name = flex_array_get_ptr(old_names, i);
++        if (!old_type || !old_name ||
++            (old_map && flex_array_put(maps, i, old_map, GFP_KERNEL)) ||
++            flex_array_put_ptr(types, i, old_type, GFP_KERNEL) ||
++            flex_array_put_ptr(names, i, old_name, GFP_KERNEL))
++            goto out;
++    }
++    if (ebitmap_set_bit(&self, count, 1) ||
++        flex_array_put(maps, count, &self, GFP_KERNEL) ||
++        flex_array_put_ptr(types, count, type, GFP_KERNEL) ||
++        flex_array_put_ptr(names, count, key, GFP_KERNEL))
++        goto out;
++
++    if (db->p_roles.nprim) {
++        roles = kcalloc(db->p_roles.nprim, sizeof(*roles), GFP_KERNEL);
++        if (!roles)
++            goto out;
++        for (i = 0; i < db->p_roles.nprim; i++) {
++            if (!db->role_val_to_struct[i] ||
++                ebitmap_cpy(&roles[i], &db->role_val_to_struct[i]->types) ||
++                ebitmap_set_bit(&roles[i], count, 1))
++                goto out;
++        }
++    }
++    /* Last fallible operation. On success the hash owns key and type. */
++    if (symtab_insert(&db->p_types, key, type))
++        goto out;
++
++    db->type_attr_map_array = maps;
++    db->type_val_to_struct_array = types;
++    db->sym_val_to_name[SYM_TYPES] = names;
++    db->p_types.nprim = value;
++    for (i = 0; i < db->p_roles.nprim; i++) {
++        ebitmap_destroy(&db->role_val_to_struct[i]->types);
++        db->role_val_to_struct[i]->types = roles[i];
++    }
++    kfree(roles); /* Role bitmap nodes have transferred to the policy. */
++    flex_array_free(old_maps); /* Borrowed map nodes now belong to maps. */
++    flex_array_free(old_types);
++    flex_array_free(old_names);
++    return true;
++
++out:
++    if (roles) {
++        for (i = 0; i < db->p_roles.nprim; i++)
++            ebitmap_destroy(&roles[i]);
++    }
++    kfree(roles);
++    ebitmap_destroy(&self);
++    /* Free only containers: copied old bitmap nodes still belong to the policy. */
++    if (maps)
++        flex_array_free(maps);
++    if (types)
++        flex_array_free(types);
++    if (names)
++        flex_array_free(names);
++    kfree(key);
++    kfree(type);
++    return false;
++}
++#endif /* KSU_COMPAT_DEVON_SELINUX_POLICY */
++
+ static bool add_type(struct policydb *db, const char *type_name, bool attr)
+ {
+ #ifdef KSU_SUPPORT_ADD_TYPE
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    return ksu_devon_add_type(db, type_name, attr);
++#else
+     struct type_datum *type = symtab_search(&db->p_types, type_name);
+     if (type) {
+         pr_warn("Type %s already exists\n", type_name);
+@@ -914,6 +1049,7 @@ static bool add_type(struct policydb *db, const char *type_name, bool attr)
+     return true;
+ #endif
+ 
++#endif /* KSU_COMPAT_DEVON_SELINUX_POLICY */
+ #else
+     return false;
+ #endif
+@@ -1145,7 +1281,22 @@ int ksu_dup_policydb(struct policydb *old_db, struct policydb *new_db)
+     void *data;
+     int ret = 0;
+     int len = 0;
++#ifdef KSU_COMPAT_DEVON_SELINUX_POLICY
++    size_t capacity, padding;
+ 
++    if (!old_db || !new_db)
++        return -EINVAL;
++    ksu_lock_sepolicy_legacy();
++    if (check_mul_overflow((size_t)old_db->p_types.nprim,
++                           sizeof(u32) + sizeof(u64), &padding) ||
++        check_add_overflow((size_t)old_db->len, padding, &capacity) ||
++        !capacity || capacity > INT_MAX) {
++        ksu_unlock_sepolicy_legacy();
++        return -EOVERFLOW;
++    }
++    len = capacity;
++    ksu_unlock_sepolicy_legacy();
++#else
+     ksu_lock_sepolicy_legacy();
+ 
+     // Some device policy db seems not marking type itself in type_attr_map_array
+@@ -1154,6 +1305,7 @@ int ksu_dup_policydb(struct policydb *old_db, struct policydb *new_db)
+     len = old_db->len + (size_t)old_db->p_types.nprim * (sizeof(u32) + sizeof(u64));
+ 
+     ksu_unlock_sepolicy_legacy();
++#endif
+ 
+     data = vmalloc(len);
+     if (!data) {
+@@ -1180,7 +1332,7 @@ int ksu_dup_policydb(struct policydb *old_db, struct policydb *new_db)
+     // fixup config
+     // 4*2+8+4
+     static const size_t kConfigOff = 20;
+-    if (len >= kConfigOff + sizeof(u32)) {
++    if (len >= 0 && (size_t)len >= kConfigOff + sizeof(u32)) {
+         u32 *config_ptr = data + kConfigOff;
+ #ifdef KSU_COMPAT_HAS_POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE
+         if (old_db->android_netlink_route) {
+diff --git a/kernel/tools/kernel_compat.mk b/kernel/tools/kernel_compat.mk
+index dc87d99..2023956 100644
+--- a/kernel/tools/kernel_compat.mk
++++ b/kernel/tools/kernel_compat.mk
+@@ -331,3 +331,10 @@ ifeq ($(shell grep -q -F "rc = mls_context_to_sid(pol, oldc, p, ctx, sidtabp, de
+ $(info -- $(REPO_NAME)/compat: stricter mls_context_to_sid found)
+ ccflags-y += -DKSU_COMPAT_HAS_STRICTER_MLS_CONTEXT_TO_SID
+ endif
++
++# Google's backport
++# https://android-review.googlesource.com/q/Iead2a1d90731ae24fefec2a40af5ffdc457ac916
++ifeq ($(shell grep -q "^int context_add_hash" $(srctree)/security/selinux/ss/services.c 2>/dev/null; echo $$?),0)
++$(info -- $(REPO_NAME)/compat: found hash indexed sidtab)
++ccflags-y += -DKSU_COMPAT_HAS_CONTEXT_ADD_HASH
++endif
