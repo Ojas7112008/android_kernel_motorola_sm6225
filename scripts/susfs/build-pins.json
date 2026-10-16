@@ -124,7 +124,7 @@
     "KSU_SUSFS_SUS_MAP": "n"
   },
   "toolchain": {
-    "url": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-16.0.0_r4/clang-r547379.tar.gz",
+    "url": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/9916fb51ccb914d62d35ad9a7b9b21d2ef046928/clang-r547379.tar.gz",
     "commit": "9916fb51ccb914d62d35ad9a7b9b21d2ef046928",
     "revision": "r547379",
     "archive_sha256": "6350d387cbe6d75c1df1018da2a29c6bf1b233bd58e122e44f3ef5b16a90facc",
@@ -136,7 +136,10 @@
       "bin/llvm-objcopy": "d2a3191ad2228bb60c35e18466615cb53ed7263c2e73134624349f0367cb1f88",
       "bin/llvm-strip": "d2a3191ad2228bb60c35e18466615cb53ed7263c2e73134624349f0367cb1f88",
       "bin/llvm-objdump": "3af14767b7a8fe24d82052d1c76b193b74205f8321ef7188ef9fd8866822491d"
-    }
+    },
+    "git_tree": "17fee43bde5bc5860dc1d04be5ead3bd6e6f91f0",
+    "content_tree_sha256": "ed38c5043e6b711d1eb8f42432556a770a3b68dfc48e1a9cc7025258d246bf3f",
+    "archive_sha256_note": "Historical transport checksum; Gitiles rewrites tar mtimes. Complete Git/SHA256 content trees and executable hashes are mandatory."
   },
   "actions": {
     "checkout": "11bd71901bbe5b1630ceea73d27597364c9af683",

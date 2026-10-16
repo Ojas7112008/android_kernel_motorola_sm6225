@@ -25,7 +25,9 @@ jobs:
           sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev python3 python3-yaml clang lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu rsync dwarves
           df -h .
       - name: Verify pinned Android Clang
-        run: python3 scripts/ci/install_toolchain.py
+        run: |
+          python3 -B scripts/ci/test_toolchain_integrity.py
+          python3 -B scripts/ci/install_toolchain.py
       - name: Prepare pinned host test references
         run: python3 -B scripts/susfs/prepare_test_references.py
       - name: Check feature contracts and native ABI

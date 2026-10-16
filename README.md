@@ -11,7 +11,7 @@ Open **Actions**, select the desired workflow, then **Run workflow** from the de
 
 The SUSFS workflow selects all eight reviewed features: SUS_PATH, SUS_MOUNT, SUS_KSTAT, SPOOF_UNAME, HIDE_KSU_SUSFS_SYMBOLS, SPOOF_CMDLINE_OR_BOOTCONFIG, OPEN_REDIRECT and SUS_MAP. The 5.10 reference is SUSFS commit `82f08351fadb8b19dd6591bd14634d02ad832145`. AVC log spoofing returns `EOPNOTSUPP`. Native BakaSU version and compatibility checks, SELinux enforcement, Clang CFI/LTO and module versioning remain enabled.
 
-For local Linux/WSL builds, see [docs/DEVON_BUILDS.md](docs/DEVON_BUILDS.md). The official Android Clang r547379 archive and executable hashes are pinned; changing a branch or dependency requires deliberate review, not a floating update.
+For local Linux/WSL builds, see [docs/DEVON_BUILDS.md](docs/DEVON_BUILDS.md). The official Android Clang r547379 complete content tree and executable hashes are pinned; changing a branch or dependency requires deliberate review, not a floating update.
 
 Earlier source revisions passed kernel builds and limited device boot/root/module/mount-ID checks. This publication moves the port onto the newer clean Lineage base. A successful build does not establish safe booting, hiding-rule correctness or long-term stability. Match the target ROM's vendor module ABI and device trees before separately authorized device testing. No boot images or personal device logs are stored in this repository.
 

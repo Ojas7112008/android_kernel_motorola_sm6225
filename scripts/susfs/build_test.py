@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare or build pinned devon SUSFS experiments; no boot/runtime claim."""
 import argparse
+import sys
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -15,6 +16,9 @@ import tempfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / 'scripts/ci'))
+from toolchain_integrity import prepare_toolchain
 PINS_FILE = ROOT / 'scripts/susfs/build-pins.json'
 FEATURE_OBJECTS = {
     'SUS_PATH': ['susfs_path.o', 'susfs_fuse.o'],
@@ -155,36 +159,6 @@ def prepare_dependency(pins):
     return repo
 
 
-def prepare_toolchain(directory, pins):
-    tool = pins['toolchain']
-    if not directory.exists():
-        directory.parent.mkdir(parents=True, exist_ok=True)
-        archive = directory.parent / 'android-16-r547379.tar.gz'
-        if not archive.exists():
-            partial = archive.with_suffix('.download')
-            print('Downloading pinned Android Clang archive...', flush=True)
-            urllib.request.urlretrieve(tool['url'], partial)
-            if sha(partial) != tool['archive_sha256']:
-                raise ValueError('Downloaded toolchain checksum mismatch')
-            partial.rename(archive)
-        if sha(archive) != tool['archive_sha256']:
-            raise ValueError('Cached toolchain archive checksum mismatch')
-        with tempfile.TemporaryDirectory(prefix='devon-clang-', dir=directory.parent) as temp:
-            destination = Path(temp)
-            with tarfile.open(archive, 'r:gz') as bundle:
-                # The exact verified official archive uses relative paths.
-                for member in bundle.getmembers():
-                    if Path(member.name).is_absolute() or '..' in Path(member.name).parts:
-                        raise ValueError('Unexpected archive path')
-                    if member.issym() or member.islnk():
-                        parent = (destination / member.name).parent if member.issym() else destination
-                        (parent / member.linkname).resolve().relative_to(destination.resolve())
-                bundle.extractall(destination, filter='data') if hasattr(tarfile, 'data_filter') else bundle.extractall(destination)
-            destination.rename(directory)
-    for name, expected in tool['files'].items():
-        if sha(directory / name) != expected:
-            raise ValueError(f'Toolchain fingerprint mismatch: {name}')
-    return run([str(directory / 'bin/clang'), '--version'])
 
 
 def kbuild_preflight(out, artifacts, env, pins, profile='core'):
